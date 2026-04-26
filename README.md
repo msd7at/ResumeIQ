@@ -187,3 +187,6 @@ PORT=8000
 
 Built by a Java developer (5.5 YOE) learning Python + AI Engineering.
 Project purpose: Showcase AI Backend Engineering skills for job interviews.
+
+# ResumeIQ
+ResumeIQ

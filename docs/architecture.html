@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>ResumeIQ — Architecture Diagrams</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    /* ── Base ── */
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: #fff;
+      color: #111;
+      font-size: 11pt;
+    }
+
+    /* ── A4 Page ── */
+    .page {
+      width: 210mm;
+      min-height: 297mm;
+      margin: 0 auto 10mm auto;
+      padding: 14mm 16mm 14mm 16mm;
+      border: 1px solid #ccc;
+      background: #fff;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Cover Page ── */
+    .cover {
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+      gap: 10px;
+    }
+    .cover h1 {
+      font-size: 2.2rem;
+      font-weight: 800;
+      color: #111;
+      letter-spacing: 2px;
+      border-bottom: 3px solid #111;
+      padding-bottom: 8px;
+    }
+    .cover .tagline {
+      font-size: 1rem;
+      color: #444;
+      margin-top: 6px;
+    }
+    .cover .toc {
+      margin-top: 28px;
+      text-align: left;
+      background: #fff;
+      border: 1px solid #bbb;
+      border-radius: 6px;
+      padding: 18px 24px;
+      width: 100%;
+    }
+    .cover .toc h3 {
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #555;
+      margin-bottom: 12px;
+    }
+    .cover .toc ol {
+      padding-left: 20px;
+    }
+    .cover .toc li {
+      padding: 5px 0;
+      font-size: 0.95rem;
+      color: #222;
+    }
+    .cover .toc li span {
+      color: #666;
+      font-size: 0.85rem;
+    }
+    .cover .stack-table {
+      margin-top: 24px;
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.88rem;
+    }
+    .cover .stack-table th {
+      background: #111;
+      color: #fff;
+      padding: 7px 12px;
+      text-align: left;
+    }
+    .cover .stack-table td {
+      padding: 6px 12px;
+      border-bottom: 1px solid #e0e0e0;
+    }
+    .cover .stack-table tr:nth-child(even) td {
+      background: #fff;
+    }
+
+    /* ── Diagram Pages ── */
+    .page-title {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: #111;
+      border-left: 4px solid #555;
+      padding: 4px 0 4px 10px;
+      margin-bottom: 4px;
+    }
+    .page-sub {
+      font-size: 0.8rem;
+      color: #666;
+      margin-bottom: 12px;
+      padding-left: 14px;
+    }
+    .diagram-box {
+      border: 1px solid #bbb;
+      border-radius: 4px;
+      padding: 10px;
+      background: #fff;
+      flex: 1;
+      overflow: hidden;
+    }
+    .mermaid svg {
+      max-width: 100% !important;
+      height: auto !important;
+    }
+
+    /* ── Explanation ── */
+    .explain {
+      margin-top: 12px;
+      border-top: 1px solid #ddd;
+      padding-top: 10px;
+    }
+    .explain h3 {
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: #555;
+      margin-bottom: 8px;
+    }
+    .explain-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .explain-item {
+      background: #fff;
+      border: 1px solid #bbb;
+      border-radius: 4px;
+      padding: 8px 10px;
+      font-size: 0.8rem;
+    }
+    .explain-item strong {
+      display: block;
+      font-size: 0.78rem;
+      color: #111;
+      margin-bottom: 2px;
+    }
+    .explain-item span {
+      color: #444;
+      line-height: 1.4;
+    }
+    .explain-flow {
+      font-size: 0.82rem;
+      color: #333;
+      line-height: 1.7;
+      background: #fff;
+      padding: 10px 14px;
+      border-radius: 4px;
+      border: 1px solid #bbb;
+    }
+    .explain-flow b { color: #111; }
+
+    /* ── Print ── */
+    @media print {
+      body { background: #fff; }
+      .page {
+        border: none;
+        margin: 0;
+        page-break-after: always;
+        width: 100%;
+      }
+      .page:last-child { page-break-after: avoid; }
+    }
+    @page { size: A4; margin: 0; }
+  </style>
+</head>
+<body>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      fontSize: '11px',
+      primaryColor: '#ffffff',
+      primaryTextColor: '#111111',
+      primaryBorderColor: '#0070c0',
+      lineColor: '#0070c0',
+      secondaryColor: '#ffffff',
+      tertiaryColor: '#ffffff',
+      clusterBkg: '#ffffff',
+      clusterBorder: '#e63946',
+      edgeLabelBackground: '#ffffff',
+      titleColor: '#111111'
+    },
+    flowchart: { curve: 'basis', padding: 10 },
+    er: { useMaxWidth: true }
+  });
+</script>
+
+<!-- ════════════════════════════════════════
+     PAGE 0  —  COVER
+════════════════════════════════════════ -->
+<div class="page cover">
+  <div>
+    <h1>ResumeIQ</h1>
+    <p class="tagline">AI-Powered Resume Analyser — Architecture Documentation</p>
+  </div>
+
+  <div class="toc">
+    <h3>Contents</h3>
+    <ol>
+      <li>High Level Architecture <span>— End-to-end user flow through the system</span></li>
+      <li>Component Diagram <span>— Internal modules and their connections</span></li>
+      <li>Database Schema <span>— SQLite tables, columns, and relationships</span></li>
+    </ol>
+  </div>
+
+  <table class="stack-table">
+    <tr><th>Component</th><th>Technology</th><th>Purpose</th></tr>
+    <tr><td>Backend API</td><td>FastAPI + Uvicorn</td><td>REST endpoints, file upload, streaming</td></tr>
+    <tr><td>AI Orchestration</td><td>LangGraph 0.2+</td><td>Multi-agent state machine pipeline</td></tr>
+    <tr><td>LLM</td><td>Ollama — llama3.1:8b</td><td>Local inference, free, no API key</td></tr>
+    <tr><td>Embeddings</td><td>Ollama — nomic-embed-text</td><td>Resume chunk vectorisation</td></tr>
+    <tr><td>Vector DB</td><td>ChromaDB 0.6+</td><td>Stores and retrieves resume vectors</td></tr>
+    <tr><td>Metadata DB</td><td>SQLite</td><td>Session tracking, analysis results, chat</td></tr>
+    <tr><td>PDF Parsing</td><td>PyMuPDF</td><td>Extract text from PDF resumes</td></tr>
+    <tr><td>DOCX Parsing</td><td>python-docx</td><td>Extract text from Word resumes</td></tr>
+    <tr><td>Web Search</td><td>DuckDuckGo</td><td>Company info + salary data, no API key</td></tr>
+    <tr><td>Validation</td><td>Pydantic v2</td><td>Request/response schema validation</td></tr>
+  </table>
+</div>
+
+<!-- ════════════════════════════════════════
+     PAGE 1  —  HIGH LEVEL ARCHITECTURE
+════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-title">Diagram 1 — High Level Architecture</div>
+  <div class="page-sub">End-to-end flow: from user browser → FastAPI → RAG Pipeline → LangGraph Agents → Response</div>
+
+  <div class="diagram-box">
+    <div class="mermaid">
+flowchart TD
+    User(["USER\nBrowser"])
+
+    subgraph FE["FRONTEND  localhost:8000"]
+        UI["index.html\nUpload Form · Results · Chat"]
+    end
+
+    subgraph BE["FASTAPI BACKEND"]
+        API["routes.py\n/upload   /analyse   /chat   /status"]
+        DB1[("SQLite\nSession Store")]
+    end
+
+    subgraph RAG["RAG PIPELINE"]
+        direction LR
+        P["Parser\nPDF / DOCX"] --> V["Validator\nmissing fields"]
+        V -->|"pass"| C["Chunker\nsectional split"]
+        V -->|"fail"| UI
+        C --> E["Embedder\nnomic-embed-text"]
+        E --> VDB[("ChromaDB\nvectors")]
+    end
+
+    subgraph LG["LANGGRAPH AGENT PIPELINE"]
+        A1["Agent 1\nResume Analyser"] --> A2["Agent 2\nDynamic Router"]
+        A2 -->|"company given"| A3a["Agent 3a\nCompany Q Generator"]
+        A2 -->|"no company"| A3b["Agent 3b\nGeneral Q Generator"]
+        A3a --> A4["Agent 4\nSalary + Market Intel"]
+        A3b --> A4
+        A4 --> A5["Agent 5\nReport Compiler"]
+    end
+
+    subgraph EXT["EXTERNAL  all free / local"]
+        OL["Ollama\nllama3.1:8b"]
+        DDG["DuckDuckGo\nWeb Search"]
+    end
+
+    User -->|"resume + company + location"| UI
+    UI --> API
+    API --> DB1
+    API --> P
+    VDB --> A1
+    A5 -->|"streaming report"| API
+    API -->|"results"| UI
+    A1 & A3a & A3b & A4 --> OL
+    A3a & A4 --> DDG
+    </div>
+  </div>
+
+  <div class="explain">
+    <h3>How it works — step by step</h3>
+    <div class="explain-flow">
+      <b>1. Upload</b> — User uploads PDF/DOCX resume, enters company name (optional) and location. FastAPI saves a new session row in SQLite with status = <i>uploaded</i>.<br/>
+      <b>2. Parse</b> — PyMuPDF (PDF) or python-docx (DOCX) extracts raw text from the file.<br/>
+      <b>3. Validate</b> — Checks if mandatory fields (name, email, phone, experience) are present. If missing → UI prompts user to fill manually or re-upload. Status = <i>validation_failed</i>.<br/>
+      <b>4. Chunk + Embed</b> — Resume split into sections (Contact / Experience / Skills / Education / Projects). Each section converted to a 768-dim vector using Ollama nomic-embed-text and stored in ChromaDB. Status = <i>rag_ready</i>.<br/>
+      <b>5. LangGraph starts</b> — Agent 1 retrieves relevant chunks from ChromaDB and analyses skills, gaps, red flags. Agent 2 routes based on whether company name was given. Agent 3a/3b generates interview questions. Agent 4 searches DuckDuckGo for salary + hiring companies. Agent 5 compiles everything into a final markdown report.<br/>
+      <b>6. Response</b> — FastAPI streams the report to the browser. User can then ask follow-up questions in the chat interface.
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════
+     PAGE 2  —  COMPONENT DIAGRAM
+════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-title">Diagram 2 — Component Diagram</div>
+  <div class="page-sub">Internal Python modules, their single responsibility, and how data flows between them</div>
+
+  <div class="diagram-box">
+    <div class="mermaid">
+flowchart LR
+    subgraph API["app/api/"]
+        routes["routes.py"]
+    end
+
+    subgraph MOD["app/models/"]
+        schemas["schemas.py\nPydantic"]
+    end
+
+    subgraph RAG["app/rag/"]
+        pdf["pdf_parser.py"]
+        docx["docx_parser.py"]
+        val["validator.py"]
+        chunk["chunker.py"]
+        embed["embedder.py"]
+        vs["vector_store.py"]
+    end
+
+    subgraph GR["app/graph/"]
+        state["state.py"]
+        gb["graph_builder.py"]
+        subgraph AG["agents/"]
+            ra["resume_analyser.py"]
+            ro["router.py"]
+            qg["question_generator.py"]
+            sa["salary_agent.py"]
+            rc["report_compiler.py"]
+        end
+    end
+
+    subgraph TO["app/tools/"]
+        ws["web_search.py"]
+        rr["rag_retriever.py"]
+    end
+
+    subgraph DB["app/db/"]
+        sq["sqlite_client.py"]
+    end
+
+    routes --> schemas
+    routes --> pdf & docx
+    routes --> sq
+    routes --> gb
+    pdf & docx --> val --> chunk --> embed --> vs
+    gb --> state
+    gb --> ra & ro & qg & sa & rc
+    ra & qg --> rr --> vs
+    qg & sa --> ws
+    ra & qg & sa & rc --> state
+    </div>
+  </div>
+
+  <div class="explain">
+    <h3>Module responsibilities</h3>
+    <div class="explain-grid">
+      <div class="explain-item">
+        <strong>routes.py</strong>
+        <span>Entry point for all HTTP requests. Calls RAG pipeline, triggers LangGraph, reads/writes SQLite.</span>
+      </div>
+      <div class="explain-item">
+        <strong>schemas.py</strong>
+        <span>Pydantic models defining exact shape of every API request and response. FastAPI validates automatically.</span>
+      </div>
+      <div class="explain-item">
+        <strong>pdf_parser.py / docx_parser.py</strong>
+        <span>Extracts plain text from uploaded files. PyMuPDF for PDF, python-docx for Word files.</span>
+      </div>
+      <div class="explain-item">
+        <strong>validator.py</strong>
+        <span>Checks extracted text for mandatory fields — name, email, phone, experience years.</span>
+      </div>
+      <div class="explain-item">
+        <strong>chunker.py</strong>
+        <span>Splits resume text into labelled sections: Contact, Experience, Skills, Education, Projects.</span>
+      </div>
+      <div class="explain-item">
+        <strong>embedder.py + vector_store.py</strong>
+        <span>Converts each chunk into a 768-dim vector via Ollama, stores in ChromaDB with section metadata.</span>
+      </div>
+      <div class="explain-item">
+        <strong>state.py</strong>
+        <span>LangGraph ResumeState TypedDict — single shared object that all agents read from and write to.</span>
+      </div>
+      <div class="explain-item">
+        <strong>graph_builder.py</strong>
+        <span>Compiles the LangGraph StateGraph — registers nodes, edges, conditional routing, and returns runnable.</span>
+      </div>
+      <div class="explain-item">
+        <strong>web_search.py</strong>
+        <span>DuckDuckGo search tool — used by Company Q Agent and Salary Agent. No API key needed.</span>
+      </div>
+      <div class="explain-item">
+        <strong>sqlite_client.py</strong>
+        <span>All database operations — session CRUD, save analysis results, store/fetch chat history.</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════
+     PAGE 3  —  DATABASE SCHEMA
+════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-title">Diagram 3 — Database Schema (SQLite)</div>
+  <div class="page-sub">Three tables, their columns with data types, foreign key relationships, and status lifecycle</div>
+
+  <div class="diagram-box">
+    <div class="mermaid">
+erDiagram
+    resume_sessions {
+        TEXT id PK "session UUID"
+        TEXT filename "uploaded file name"
+        TEXT user_location "e.g. Bangalore"
+        TEXT target_company "optional"
+        TEXT status "lifecycle state"
+        TEXT missing_fields "JSON array"
+        INTEGER chunks_count "no. of RAG chunks"
+        TEXT created_at "ISO datetime"
+        TEXT updated_at "ISO datetime"
+    }
+
+    analysis_results {
+        INTEGER id PK
+        TEXT session_id FK
+        TEXT resume_issues "JSON array"
+        TEXT skills_found "JSON array"
+        TEXT questions "JSON array"
+        TEXT salary_range "JSON object"
+        TEXT active_companies "JSON array"
+        TEXT created_at "ISO datetime"
+    }
+
+    chat_history {
+        INTEGER id PK
+        TEXT session_id FK
+        TEXT role "user or assistant"
+        TEXT message "chat text"
+        TEXT timestamp "ISO datetime"
+    }
+
+    resume_sessions ||--o{ analysis_results : "has"
+    resume_sessions ||--o{ chat_history : "has"
+    </div>
+  </div>
+
+  <div class="explain">
+    <h3>Key design decisions</h3>
+    <div class="explain-grid">
+      <div class="explain-item">
+        <strong>status lifecycle</strong>
+        <span>uploaded → rag_ready → processing → completed (or validation_failed / failed). Every agent transition updates this column so the frontend /status endpoint can show live progress.</span>
+      </div>
+      <div class="explain-item">
+        <strong>JSON as TEXT columns</strong>
+        <span>SQLite has no native array/object type. Lists and dicts are stored as JSON strings and parsed with json.loads() on read. Acceptable at this scale; use PostgreSQL JSONB for production.</span>
+      </div>
+      <div class="explain-item">
+        <strong>One-to-many relationships</strong>
+        <span>One session → many analysis_results rows (supports re-analysis). One session → many chat_history rows (full conversation stored in order by id ASC).</span>
+      </div>
+      <div class="explain-item">
+        <strong>TEXT primary key for sessions</strong>
+        <span>session_id is a UUID string (e.g. sess_a1b2c3) generated at upload time, not an auto-increment integer — makes it safe to share in API responses without exposing row counts.</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
