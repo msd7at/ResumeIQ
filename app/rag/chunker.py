@@ -2,17 +2,87 @@ import re
 from dataclasses import dataclass, field
 
 
-# Known section headings — matched case-insensitively at line start
+# Known section headings — matched case-insensitively, full-line match only.
+# Each tuple: (compiled regex, section label)
+# Multi-word variants listed explicitly so "Professional Experience" etc. are caught.
 _SECTION_PATTERNS = [
-    (re.compile(r"^\s*(summary|objective|profile|about me)\s*$", re.IGNORECASE),    "SUMMARY"),
-    (re.compile(r"^\s*(skills?|technologies|tech stack|tools|competencies)\s*$", re.IGNORECASE), "SKILLS"),
-    (re.compile(r"^\s*(experience|work history|employment|career)\s*$", re.IGNORECASE), "EXPERIENCE"),
-    (re.compile(r"^\s*(education|academic|degree|qualification)\s*$", re.IGNORECASE), "EDUCATION"),
-    (re.compile(r"^\s*(projects?|portfolio|personal projects?)\s*$", re.IGNORECASE), "PROJECTS"),
-    (re.compile(r"^\s*(certifications?|certificates?|courses?)\s*$", re.IGNORECASE), "CERTIFICATIONS"),
-    (re.compile(r"^\s*(awards?|achievements?|honours?|honors?)\s*$", re.IGNORECASE), "ACHIEVEMENTS"),
-    (re.compile(r"^\s*(languages?)\s*$", re.IGNORECASE),                             "LANGUAGES"),
-    (re.compile(r"^\s*(contact|personal info|personal details)\s*$", re.IGNORECASE), "CONTACT"),
+    (re.compile(
+        r"^\s*(summary|professional summary|career summary|executive summary|"
+        r"objective|career objective|profile|professional profile|"
+        r"about me|personal statement)\s*$", re.IGNORECASE
+    ), "SUMMARY"),
+
+    (re.compile(
+        r"^\s*(skills?|technical skills?|core skills?|key skills?|professional skills?|"
+        r"technologies|tech stack|tools|competencies|expertise|"
+        r"areas? of expertise|skillset|skill set)\s*$", re.IGNORECASE
+    ), "SKILLS"),
+
+    (re.compile(
+        r"^\s*(experience|professional experience|work experience|relevant experience|"
+        r"industry experience|internship experience|internships?|"
+        r"employment|employment history|work history|career|career history|"
+        r"work background|professional background)\s*$", re.IGNORECASE
+    ), "EXPERIENCE"),
+
+    (re.compile(
+        r"^\s*(education|educational background|academic background|academic|"
+        r"academic qualifications?|educational qualifications?|"
+        r"degree|qualifications?|schooling)\s*$", re.IGNORECASE
+    ), "EDUCATION"),
+
+    (re.compile(
+        r"^\s*(projects?|key projects?|notable projects?|personal projects?|"
+        r"side projects?|academic projects?|open source|portfolio)\s*$", re.IGNORECASE
+    ), "PROJECTS"),
+
+    (re.compile(
+        r"^\s*(certifications?|professional certifications?|certificates?|"
+        r"licenses?|accreditations?|credentials?|courses?|training)\s*$", re.IGNORECASE
+    ), "CERTIFICATIONS"),
+
+    (re.compile(
+        r"^\s*(awards?|achievements?|honours?|honors?|recognition|accolades?)\s*$",
+        re.IGNORECASE
+    ), "ACHIEVEMENTS"),
+
+    (re.compile(
+        r"^\s*(languages?|language skills?|languages? known|foreign languages?)\s*$",
+        re.IGNORECASE
+    ), "LANGUAGES"),
+
+    (re.compile(
+        r"^\s*(contact|contact information|contact details?|"
+        r"personal info|personal information|personal details?)\s*$", re.IGNORECASE
+    ), "CONTACT"),
+
+    (re.compile(
+        r"^\s*(publications?|research papers?|papers?|journal articles?|presentations?)\s*$",
+        re.IGNORECASE
+    ), "PUBLICATIONS"),
+
+    (re.compile(
+        r"^\s*(research|research experience|research projects?)\s*$", re.IGNORECASE
+    ), "RESEARCH"),
+
+    (re.compile(
+        r"^\s*(volunteer|volunteer experience|volunteer work|"
+        r"community service|community involvement)\s*$", re.IGNORECASE
+    ), "VOLUNTEER"),
+
+    (re.compile(
+        r"^\s*(leadership|leadership experience|campus activities|"
+        r"student organizations?)\s*$", re.IGNORECASE
+    ), "LEADERSHIP"),
+
+    (re.compile(
+        r"^\s*(interests?|hobbies|hobbies and interests?|personal interests?|"
+        r"extracurricular|extracurricular activities|activities)\s*$", re.IGNORECASE
+    ), "INTERESTS"),
+
+    (re.compile(
+        r"^\s*(references?|professional references?)\s*$", re.IGNORECASE
+    ), "REFERENCES"),
 ]
 
 MAX_CHUNK_CHARS = 800   # soft cap per chunk — keeps embeddings focused
