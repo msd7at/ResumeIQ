@@ -281,6 +281,179 @@ This is the **abstraction boundary** — the rest of the pipeline doesn't know o
 
 ---
 
+### Step 1.5 — Resume Validator
+
+**File(s) created:** `app/rag/validator.py`
+
+#### What this step does
+
+Scans the extracted resume text and checks whether critical fields are present. Returns a `ValidationResult` with three pieces of info:
+
+- `is_valid` — `True` only if all mandatory fields are found
+- `missing_fields` — list of things that are definitely absent (email, phone, sections)
+- `warnings` — things that are absent but optional (projects, summary)
+
+If `is_valid` is `False`, the LangGraph pipeline sets the session status to `validation_failed` and stops — no point embedding an incomplete resume.
+
+#### What is checked
+
+| Check | Type | Logic used |
+|---|---|---|
+| Email address | Mandatory | Regex `[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}` |
+| Phone number | Mandatory | Regex for digit patterns with optional `+`, spaces, dashes |
+| Skills section | Mandatory | Keyword match: "skill", "technologies", "tech stack", "tools" |
+| Experience section | Mandatory | Keyword match: "experience", "employment", "work history" |
+| Education section | Mandatory | Keyword match: "education", "degree", "university", "college" |
+| Projects section | Warning | Keyword match: "project", "portfolio" |
+| Summary section | Warning | Keyword match: "summary", "objective", "profile", "about" |
+| Word count < 50 | Mandatory | Resume too short — probably parse failure |
+| Word count < 150 | Warning | Resume seems thin |
+
+#### Why regex for email/phone?
+
+These are structured patterns — regex is the right tool. LLM would be overkill (slow, non-deterministic) for detecting whether an email address exists.
+
+#### Why keyword matching for sections?
+
+Resume headings vary wildly: "Work Experience", "Professional Experience", "Employment History", "Career" — all mean the same thing. A keyword list covers the real-world variation without needing an LLM.
+
+#### The `@dataclass` + `field(default_factory=list)` pattern
+
+```python
+@dataclass
+class ValidationResult:
+    is_valid: bool
+    missing_fields: list[str] = field(default_factory=list)
+```
+
+`field(default_factory=list)` is required for mutable defaults in dataclasses. If you wrote `missing_fields: list = []` directly, Python would share the same list object across all instances — a classic Python gotcha.
+
+#### AI / LangGraph concept
+
+This is a **guard node** in the LangGraph pipeline. Before the expensive RAG steps (chunking, embedding), we validate that the input is worth processing. If validation fails, the graph routes to an early exit:
+
+```text
+[parse_pdf / parse_docx]
+        ↓
+  [validate_resume]  ←── Step 1.5
+     ↓          ↓
+  valid      invalid
+    ↓            ↓
+[chunker]   status = "validation_failed"
+                ↓
+         return error to frontend
+```
+
+This is the **conditional edge** pattern in LangGraph — one node, two possible next nodes depending on state.
+
+#### Interview Questions
+
+1. **"Why validate before chunking/embedding?"**
+   Embedding is the slowest step (calls Ollama for each chunk). No point running it on a resume with no email or no skills section — we catch bad input early and save time.
+
+2. **"Why not use the LLM to detect missing fields?"**
+   Regex and keyword matching are deterministic, instant, and free. LLMs are probabilistic, slow (local inference = seconds), and have no advantage here. Use LLMs for judgment calls; use rules for pattern matching.
+
+3. **"What is a Python dataclass?"**
+   A class decorator that auto-generates `__init__`, `__repr__`, `__eq__` based on declared fields. Cleaner than a plain dict for structured return values — fields have names, types, and IDE autocomplete.
+
+4. **"Why `field(default_factory=list)` instead of `= []`?"**
+   Mutable default arguments in Python are shared across all instances. `field(default_factory=list)` tells the dataclass to call `list()` fresh for each new instance. Classic Python gotcha.
+
+5. **"What happens in the pipeline when validation fails?"**
+   `is_valid = False` → agent sets `session.status = "validation_failed"` in SQLite → LangGraph router sends to an early exit node → `/status` API returns the missing fields to the frontend → user sees "Please add your email and skills section".
+
+6. **"How would you extend this validator?"**
+   Add LinkedIn URL check, GitHub URL check, detect if dates are missing from experience entries, check if job titles are present, detect very generic skills ("Microsoft Office") that weaken a tech resume.
+
+---
+
+### Step 1.6 — Smart Sectional Chunker
+
+**File(s) created:** `app/rag/chunker.py`
+
+#### What this step does
+
+Splits the raw resume text (one long string) into small focused **chunks** that each get embedded as a separate vector. Each chunk knows which section it came from.
+
+Output: list of `Chunk` dataclass objects, each with:
+- `section` — e.g. `"SKILLS"`, `"EXPERIENCE"`, `"HEADER"`
+- `text` — content prefixed with `[SECTION]` label
+- `chunk_index` — position in resume (0-based)
+- `metadata` — dict stored in ChromaDB alongside the vector
+
+#### Why chunk at all?
+
+LLMs and embedding models have a **context window limit**. More importantly, if the whole resume is one vector, it blends all topics. A query like "what Python skills does this person have?" needs only the `SKILLS` chunk — not the entire resume mixed together.
+
+#### Two-level splitting strategy
+
+```text
+Level 1 — Section detection  (semantic boundary)
+  Lines like "EXPERIENCE", "Skills", "Education" → split here
+  Each section = its own group of lines
+
+Level 2 — Size cap  (MAX_CHUNK_CHARS = 800)
+  If a section is > 800 chars → split further
+  Last OVERLAP_LINES (2) carried over to next chunk for context continuity
+```
+
+#### Why section-aware vs fixed-size chunking?
+
+| Strategy | Problem |
+|---|---|
+| Fixed size (every 500 chars) | Splits mid-sentence, mixes sections randomly |
+| Recursive splitter | Better, but still section-unaware |
+| **Section-aware (this approach)** | Natural boundaries = coherent chunks = better retrieval |
+
+In a resume, sections ARE the natural semantic boundaries.
+
+#### The `[SECTION]` prefix
+
+Each chunk text starts with `[EXPERIENCE]` or `[SKILLS]`. This tells the LLM which part of the resume it's reading when a chunk is retrieved and injected into a prompt.
+
+#### Overlap (`OVERLAP_LINES = 2`)
+
+Last 2 lines of a chunk repeat at the start of the next chunk within the same section. Prevents a sentence being cut in half — the model always has surrounding context.
+
+#### AI / LangGraph concept
+
+Chunking is **Stage 2** of the RAG pipeline:
+
+```text
+[Document Ingestion]  ← Steps 1.3–1.4
+        ↓
+   [Chunking]         ← Step 1.6 ✅
+        ↓
+   [Embedding]        ← Step 1.7
+        ↓
+  [Vector Store]      ← Step 1.8
+```
+
+Chunk quality = retrieval quality = LLM answer quality. This is called **chunk granularity** — one of the most critical RAG design decisions.
+
+#### Interview Questions
+
+1. **"Why not send the whole resume to the LLM?"**
+   Local LLMs have a limited context window (~8K tokens). More importantly, a focused chunk gives the LLM exactly what it needs — sending 2000 words when only 200 are relevant dilutes answer quality.
+
+2. **"What is chunk overlap and why use it?"**
+   Repeating the last N lines at the start of the next chunk avoids cutting a sentence across two chunks where neither chunk has full meaning. Without overlap, "Led a team of 5 engineers" could be split and both halves lose context.
+
+3. **"Fixed-size vs semantic chunking — which is better?"**
+   Semantic (section-aware) is better for structured documents like resumes where sections have clear meaning. Fixed-size is simpler but can mix unrelated content in one chunk.
+
+4. **"What goes into the `metadata` dict?"**
+   `session_id` and `section`. ChromaDB stores this alongside the vector. Agents can then filter: "retrieve only SKILLS chunks for session XYZ" — not all chunks from all resumes.
+
+5. **"How did you pick `MAX_CHUNK_CHARS = 800`?"**
+   Empirical — a typical resume section (skills list, one job entry) fits in 300–600 chars. 800 allows a full experience entry with bullet points without arbitrary cuts. Too small = too many noisy chunks. Too large = embeddings lose focus.
+
+6. **"How would you improve this chunker?"**
+   Use spaCy for sentence segmentation at sub-section level. Detect bullet points as natural sub-boundaries. Add page number metadata. Use LLM-based section detection for non-standard headings.
+
+---
+
 ## Progress Tracker
 
 | Step | Status | File |
@@ -288,9 +461,9 @@ This is the **abstraction boundary** — the rest of the pipeline doesn't know o
 | 1.1 Project setup | ✅ Done | `requirements.txt`, `.env`, folders |
 | 1.2 SQLite setup | ✅ Done | `app/db/sqlite_client.py` |
 | 1.3 PDF Parser | ✅ Done | `app/rag/pdf_parser.py` |
-| 1.4 DOCX Parser | ⏳ Next | `app/rag/docx_parser.py` |
-| 1.5 Validator | ⬜ Pending | `app/rag/validator.py` |
-| 1.6 Chunker | ⬜ Pending | `app/rag/chunker.py` |
+| 1.4 DOCX Parser | ✅ Done | `app/rag/docx_parser.py` |
+| 1.5 Validator | ✅ Done | `app/rag/validator.py` |
+| 1.6 Chunker | ✅ Done | `app/rag/chunker.py` |
 | 1.7 Embedder | ⬜ Pending | `app/rag/embedder.py` |
 | 1.8 Vector Store | ⬜ Pending | `app/rag/vector_store.py` |
 | 2.1 State design | ⬜ Pending | `app/graph/state.py` |
