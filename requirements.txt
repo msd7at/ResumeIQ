@@ -1,0 +1,33 @@
+# ── Web Framework ──────────────────────────────────────────
+fastapi>=0.111.0          # Backend API framework
+uvicorn[standard]>=0.29.0 # ASGI server to run FastAPI
+python-multipart>=0.0.9   # Required for file upload support in FastAPI
+
+# ── LangGraph / LangChain ──────────────────────────────────
+langgraph>=0.2.0          # AI agent orchestration (state machine for agents)
+langchain>=0.3.0          # Core LangChain (tools, prompts, chains)
+langchain-community>=0.3.0 # Community integrations (Ollama, ChromaDB, DuckDuckGo)
+langchain-ollama>=0.2.0   # Ollama-specific LangChain integration
+
+# ── LLM – Ollama (local) ───────────────────────────────────
+ollama>=0.3.0             # Python client to talk to locally running Ollama server
+
+# ── Vector Database ────────────────────────────────────────
+chromadb>=0.6.0           # Local vector DB – stores resume embeddings
+
+# ── PDF / DOCX Parsing ─────────────────────────────────────
+PyMuPDF>=1.25.0           # Fast PDF text extraction (imports as `fitz`)
+python-docx>=1.1.2        # DOCX file parsing
+
+# ── Web Search ─────────────────────────────────────────────
+duckduckgo-search>=6.1.7  # Free, no-API-key web search
+
+# ── Database ───────────────────────────────────────────────
+# sqlite3 ships with Python – no extra install needed
+
+# ── Data Validation / Serialization ───────────────────────
+pydantic>=2.7.3           # Request/response schema validation (used by FastAPI)
+
+# ── Utilities ──────────────────────────────────────────────
+python-dotenv>=1.0.1      # Loads .env file into os.environ
+aiofiles>=23.2.1          # Async file I/O for FastAPI file uploads
