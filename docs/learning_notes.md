@@ -454,6 +454,103 @@ Chunk quality = retrieval quality = LLM answer quality. This is called **chunk g
 
 ---
 
+### Step 1.7 — Ollama Embeddings
+
+**File(s) created:** `app/rag/embedder.py`
+
+#### What this step does
+
+Takes the list of `Chunk` objects produced by the chunker and converts each chunk's text into a **vector** (a list of floating-point numbers) using Ollama's `nomic-embed-text` model running locally. Also provides a second function to embed a single query string at retrieval time.
+
+Two functions:
+
+```python
+embed_chunks(chunks)  → list of dicts ready to insert into ChromaDB
+embed_query(query)    → single list[float] used at search time
+```
+
+#### What is an embedding?
+
+An embedding is a list of numbers that encodes the **meaning** of a piece of text. `nomic-embed-text` produces 768-dimensional vectors (768 floats per chunk).
+
+Texts that are semantically similar → vectors that are close together in 768-dimensional space. This is what makes similarity search possible — ChromaDB finds the chunks whose vectors are closest to the query vector.
+
+```text
+"Python developer with FastAPI experience"
+       ↓  nomic-embed-text
+[0.021, -0.134, 0.887, ... 768 numbers total]
+```
+
+#### Why two separate functions?
+
+| Function | When called | Input |
+|---|---|---|
+| `embed_chunks()` | Upload time — once per resume | list of Chunk objects |
+| `embed_query()` | Every agent question | single string |
+
+At upload time you embed all chunks and store them. At query time you embed just the question and find similar stored chunks. The model must be the same for both — you can't compare vectors from different models.
+
+#### What `embed_chunks()` returns
+
+Each dict in the list has exactly what ChromaDB needs:
+
+```python
+{
+    "id":        "sess_a1b2c3_4",      # unique — session + chunk index
+    "text":      "[SKILLS]\nPython ...", # original chunk text
+    "embedding": [0.021, -0.134, ...],  # 768 floats
+    "metadata":  {"session_id": "...", "section": "SKILLS"}
+}
+```
+
+The `id` is `{session_id}_{chunk_index}` — unique per session so two different resumes don't collide in ChromaDB.
+
+#### Why Ollama / nomic-embed-text?
+
+| Option | Cost | Privacy | Speed |
+|---|---|---|---|
+| OpenAI text-embedding-3 | Paid per token | Resume data leaves machine | Fast (network) |
+| **nomic-embed-text (Ollama)** | Free | Fully local | Fast (local GPU/CPU) |
+| sentence-transformers | Free | Local | Needs separate Python model |
+
+`nomic-embed-text` is specifically optimized for retrieval tasks and produces high-quality 768-dim vectors. It's the standard choice for local RAG setups.
+
+#### AI / LangGraph concept
+
+Embedding is **Stage 3** of the RAG pipeline:
+
+```text
+[Ingestion]   ✅  parse_pdf / parse_docx
+[Validation]  ✅  validate_resume
+[Chunking]    ✅  chunk_resume
+[Embedding]   ✅  embed_chunks / embed_query  ← Step 1.7
+[Vector DB]   ⏳  Step 1.8
+```
+
+`embed_query()` is called at **retrieval time** by the agents in Phase 2. The query "what Python skills does this person have?" gets embedded, ChromaDB finds the nearest chunk vectors, and those chunks are injected into the LLM prompt.
+
+#### Interview Questions
+
+1. **"What is an embedding?"**
+   A fixed-length list of floats that represents the semantic meaning of text. Similar meanings → similar vectors. Produced by an encoder model, not a generative LLM.
+
+2. **"What is nomic-embed-text? Why 768 dimensions?"**
+   An open-source embedding model optimized for retrieval. 768 is the output size of the model's encoder — each dimension captures some aspect of meaning. OpenAI's `text-embedding-3-small` uses 1536 dims. More dims ≠ always better.
+
+3. **"Why must `embed_query` use the same model as `embed_chunks`?"**
+   Different models produce vectors in completely different spaces. Comparing a nomic vector with an OpenAI vector is meaningless — like comparing temperatures in Celsius and Fahrenheit without converting.
+
+4. **"What is cosine similarity?"**
+   The standard metric for comparing embedding vectors. Measures the angle between two vectors (not their length). Value ranges from -1 to 1; closer to 1 = more similar in meaning. ChromaDB uses this by default.
+
+5. **"Why is `embed_query` called at every agent question but `embed_chunks` only once?"**
+   Chunks are static — a resume doesn't change after upload. Queries change every time an agent asks a new question. Embedding is fast (~50ms locally) but there's no point re-embedding the same chunks repeatedly.
+
+6. **"What would happen if you sent the whole resume as one embedding instead of chunks?"**
+   One 768-dim vector would represent everything — Python skills, Java history, education, hobbies — blended together. A query about Python would get diluted by all the other content. Chunked embeddings give precise, focused retrieval.
+
+---
+
 ## Progress Tracker
 
 | Step | Status | File |
@@ -464,7 +561,7 @@ Chunk quality = retrieval quality = LLM answer quality. This is called **chunk g
 | 1.4 DOCX Parser | ✅ Done | `app/rag/docx_parser.py` |
 | 1.5 Validator | ✅ Done | `app/rag/validator.py` |
 | 1.6 Chunker | ✅ Done | `app/rag/chunker.py` |
-| 1.7 Embedder | ⬜ Pending | `app/rag/embedder.py` |
+| 1.7 Embedder | ✅ Done | `app/rag/embedder.py` |
 | 1.8 Vector Store | ⬜ Pending | `app/rag/vector_store.py` |
 | 2.1 State design | ⬜ Pending | `app/graph/state.py` |
 | 2.2 Resume Analyser Agent | ⬜ Pending | `app/graph/agents/resume_analyser.py` |
