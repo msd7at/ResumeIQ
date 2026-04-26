@@ -117,14 +117,14 @@ resume-ai-agent/
 
 ### Phase 1 — RAG Pipeline
 
-- [] Step 1.1 — Project setup, folder structure, requirements.txt, venv
-- [ ] Step 1.2 — SQLite setup (3 tables)
-- [ ] Step 1.3 — PDF parser (PyMuPDF)
-- [] Step 1.4 — DOCX parser (python-docx)
-- [] Step 1.5 — Validator (missing fields check)
-- [] Step 1.6 — Smart sectional chunker
-- [] Step 1.7 — Ollama embeddings setup
-- [ ] Step 1.8 — ChromaDB setup + store + retrieve
+- [x] Step 1.1 — Project setup, folder structure, requirements.txt, venv
+- [x] Step 1.2 — SQLite setup (3 tables)
+- [x] Step 1.3 — PDF parser (PyMuPDF)
+- [x] Step 1.4 — DOCX parser (python-docx)
+- [x] Step 1.5 — Validator (missing fields check)
+- [x] Step 1.6 — Smart sectional chunker
+- [x] Step 1.7 — Ollama embeddings setup
+- [x] Step 1.8 — ChromaDB setup + store + retrieve
 
 ### Phase 2 — LangGraph Agents
 
@@ -187,6 +187,3 @@ PORT=8000
 
 Built by a Java developer (5.5 YOE) learning Python + AI Engineering.
 Project purpose: Showcase AI Backend Engineering skills for job interviews.
-
-# ResumeIQ
-ResumeIQ

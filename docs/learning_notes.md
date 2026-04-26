@@ -551,6 +551,93 @@ Embedding is **Stage 3** of the RAG pipeline:
 
 ---
 
+### Step 1.8 — ChromaDB Vector Store
+
+**File(s) created:** `app/rag/vector_store.py`
+
+#### What this step does
+
+Wraps ChromaDB operations into 4 clean functions. This is where vectors go to live on disk and where agents come to search.
+
+| Function | Purpose |
+|---|---|
+| `store_embeddings(embedded_chunks)` | Bulk insert chunks+vectors into ChromaDB |
+| `retrieve_chunks(query_embedding, session_id, ...)` | Top-n similarity search for a query |
+| `delete_session(session_id)` | Remove all chunks for a session (re-upload cleanup) |
+| `count_chunks(session_id)` | How many chunks stored for a session |
+
+#### ChromaDB internals
+
+ChromaDB stores 3 things per entry:
+1. **`id`** — unique string identifier
+2. **`document`** — the original text (chunk text with `[SECTION]` prefix)
+3. **`embedding`** — the 768-float vector
+4. **`metadata`** — dict (`session_id`, `section`) for filtering
+
+It uses an **HNSW index** (Hierarchical Navigable Small World) for approximate nearest-neighbor search — fast even with millions of vectors.
+
+#### Why `"hnsw:space": "cosine"`?
+
+ChromaDB defaults to `l2` (Euclidean distance). We set it to `cosine` explicitly because:
+- Cosine measures the **angle** between vectors — captures semantic similarity regardless of vector magnitude
+- `l2` measures raw distance — can rank long-text vectors differently than short-text vectors even if meanings are similar
+- For NLP embeddings, cosine is the standard choice
+
+**Important:** Once a collection is created with a distance metric, you can't change it. Always specify `cosine` upfront.
+
+#### Why always filter by `session_id`?
+
+Multiple users upload different resumes. Without the filter, a question about "Python skills" could retrieve chunks from a completely different person's resume. The `session_id` filter scopes every query to one resume only.
+
+```python
+where = {"session_id": session_id}             # single filter
+where = {"$and": [{"session_id": ...}, {"section": "SKILLS"}]}  # combined filter
+```
+
+#### `PersistentClient` vs `Client`
+
+| Client | Storage | Use case |
+|---|---|---|
+| `chromadb.Client()` | In-memory only | Testing, throwaway |
+| `chromadb.PersistentClient(path=...)` | On disk at `path` | Production, this project |
+| `chromadb.HttpClient(host=...)` | Remote server | Distributed/cloud |
+
+We use `PersistentClient` — data survives restarts, stored at `./data/chroma_db`.
+
+#### Complete RAG pipeline — all 5 stages done
+
+```text
+[Ingestion]   ✅  parse_pdf() / parse_docx()
+[Validation]  ✅  validate_resume()
+[Chunking]    ✅  chunk_resume()
+[Embedding]   ✅  embed_chunks() / embed_query()
+[Vector DB]   ✅  store_embeddings() / retrieve_chunks()
+```
+
+Phase 1 complete. Phase 2 begins: LangGraph agents will call `retrieve_chunks()` + `embed_query()` to power RAG-based resume analysis.
+
+#### Interview Questions
+
+1. **"What is ChromaDB? Why not Pinecone?"**
+   ChromaDB is a local, embedded vector database — zero setup, no account, stores data on disk. Pinecone is a managed cloud service. For a local/portfolio project, ChromaDB is the right choice — no API keys, no cost, no internet.
+
+2. **"What is HNSW?"**
+   Hierarchical Navigable Small World — a graph-based approximate nearest-neighbor algorithm. Instead of comparing a query vector to every stored vector (brute force), HNSW navigates a layered graph to find similar vectors in `O(log n)` time. It's the standard index for production vector databases.
+
+3. **"Why cosine similarity over Euclidean distance for text?"**
+   Cosine measures the angle between vectors — two texts can have the same meaning regardless of their length. A short phrase and a long paragraph about Python can score high cosine similarity. Euclidean distance is influenced by vector magnitude, which can vary with text length.
+
+4. **"What does `include=[]` do in `count_chunks`?"**
+   Tells ChromaDB not to return documents, embeddings, or metadatas — just the IDs. This makes the call faster since we only need the count, not the actual content.
+
+5. **"What happens if two resumes are stored for the same session_id?"**
+   Old and new chunks would both exist with the same `session_id`. That's why `delete_session()` is called before re-embedding on re-upload — it clears old vectors first. Otherwise retrieval would get results from both the old and new resume.
+
+6. **"How would you scale this to production?"**
+   Replace `PersistentClient` with `HttpClient` pointing to a dedicated ChromaDB server (or Weaviate/Qdrant/Pinecone). The `retrieve_chunks` and `store_embeddings` interface stays the same — only the client changes. This is why the client is created in `_get_collection()` and not passed in — easy to swap.
+
+---
+
 ## Progress Tracker
 
 | Step | Status | File |
@@ -562,7 +649,7 @@ Embedding is **Stage 3** of the RAG pipeline:
 | 1.5 Validator | ✅ Done | `app/rag/validator.py` |
 | 1.6 Chunker | ✅ Done | `app/rag/chunker.py` |
 | 1.7 Embedder | ✅ Done | `app/rag/embedder.py` |
-| 1.8 Vector Store | ⬜ Pending | `app/rag/vector_store.py` |
+| 1.8 Vector Store | ✅ Done | `app/rag/vector_store.py` |
 | 2.1 State design | ⬜ Pending | `app/graph/state.py` |
 | 2.2 Resume Analyser Agent | ⬜ Pending | `app/graph/agents/resume_analyser.py` |
 | 2.3 Dynamic Router | ⬜ Pending | `app/graph/agents/router.py` |
