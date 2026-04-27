@@ -746,6 +746,115 @@ Compare to a chain (LangChain): each step passes output to the next as a simple 
 
 ---
 
+### Step 2.2 — Resume Analyser Agent
+
+**File(s) created:** `app/graph/agents/resume_analyser.py`
+
+#### What this step does
+
+The first real **LangGraph agent**. It combines RAG retrieval with the LLM to produce two outputs:
+
+- `skills_found` — list of technical skills detected in the resume
+- `resume_issues` — list of 3–7 specific, actionable weaknesses
+
+This is the first node where the entire RAG pipeline (Phase 1) and the LLM come together.
+
+#### The 3-step flow
+
+```text
+Step 1: RAG retrieval
+  embed_query("skills technologies...")  →  retrieve_chunks(session_id, n=3)
+  embed_query("work experience...")       →  retrieve_chunks(session_id, n=3)
+  embed_query("education...")             →  retrieve_chunks(session_id, n=3)
+  → deduplicate → joined context
+
+Step 2: LLM call
+  llama3.1:8b  +  format="json"  +  strict prompt
+  → JSON response
+
+Step 3: parse → state update
+  skills_found, resume_issues, current_step
+```
+
+#### Why 3 separate RAG queries?
+
+A single query like "analyse this resume" returns whatever ChromaDB thinks is most similar — usually a random mix. Three targeted queries (skills / experience / education) each retrieve the most relevant chunks for that area, giving the LLM a **balanced view** of the resume.
+
+This is called **multi-query retrieval** — a standard technique to improve RAG context quality.
+
+#### Why `format="json"` in the Ollama call?
+
+Llama 3.1 is a generative model — by default it outputs free-form text. `format="json"` is Ollama's structured output mode that constrains the model to produce valid JSON. Without this, you'd often get markdown-wrapped JSON (` ```json ... ``` `) or trailing commentary that breaks `json.loads()`.
+
+#### Why `temperature=0.2`?
+
+| Temperature | Effect |
+|---|---|
+| 0.0 | Deterministic — same input always gives same output |
+| 0.2 | Mostly deterministic, slight variation — good for structured tasks |
+| 0.7+ | Creative — for storytelling, brainstorming |
+
+For analysis where we want consistent, factual output, low temperature is correct. Resume analysis isn't a creative task.
+
+#### The prompt design
+
+The prompt does 3 things:
+1. **Sets a role** — "You are an expert technical resume reviewer"
+2. **Provides context** — the retrieved chunks injected as `{context}`
+3. **Constrains output** — strict JSON schema, with positive examples ("GOOD examples") and negative examples ("AVOID generic feedback")
+
+The negative examples are critical — without them, the LLM defaults to bland advice like "improve formatting" or "make it more concise".
+
+#### What the agent returns
+
+```python
+return {
+    "skills_found":  ["Python", "FastAPI", "Docker", ...],
+    "resume_issues": ["No quantified achievements in 2nd job", ...],
+    "current_step":  "resume_analysed",
+}
+```
+
+This is a **partial state update**. LangGraph merges it into the full `ResumeState`. The other state fields (e.g., `salary_range`, `questions`) stay untouched until later agents fill them.
+
+#### AI / LangGraph concept
+
+This is a textbook **RAG-powered agent**:
+
+```text
+Question  →  Embed  →  Vector search  →  Retrieved chunks
+                                              ↓
+                                        Build prompt
+                                              ↓
+                                          LLM call
+                                              ↓
+                                       Structured output
+```
+
+This pattern repeats for every agent in this project — the difference is the queries used and the prompt.
+
+#### Interview Questions
+
+1. **"Walk me through what your Resume Analyser does."**
+   It runs 3 RAG queries (skills, experience, education), retrieves top-3 chunks each, deduplicates, builds a single context string, sends it to llama3.1:8b with `format=json`, parses the JSON response, and writes `skills_found` and `resume_issues` back to the LangGraph state.
+
+2. **"Why multiple RAG queries instead of one?"**
+   Multi-query retrieval gives balanced coverage. A single query returns whatever's most similar — often a random mix. Three targeted queries guarantee the LLM sees skills chunks, experience chunks, AND education chunks. This dramatically improves the LLM's ability to give balanced feedback.
+
+3. **"What is `format=json` in Ollama?"**
+   A structured output mode that forces the model to emit valid JSON. Internally Ollama uses grammar-constrained sampling to reject any token that would break JSON syntax. This is much more reliable than asking the LLM "please respond in JSON" via the prompt alone.
+
+4. **"What's the difference between temperature 0 and 0.2?"**
+   Temperature 0 is fully greedy — always picks the highest-probability token. 0.2 introduces a small amount of randomness — still mostly deterministic but allows slight variation for natural-feeling output. For structured analysis we want consistency, so 0–0.2 is the right range.
+
+5. **"What does the agent return and why is it a partial dict?"**
+   It returns only the fields it changed: `skills_found`, `resume_issues`, `current_step`. LangGraph automatically merges this into the full state — the unchanged fields (e.g., `target_company`, `chunks_count`) stay as-is. This makes nodes composable and avoids accidentally overwriting other agents' work.
+
+6. **"How would you improve this agent?"**
+   Add a self-reflection step where the LLM critiques its own output. Use chain-of-thought prompting ("First list each weakness with evidence, then format as JSON"). Add few-shot examples of high-quality issue lists. Cache embeddings of the 3 standard queries so they're not re-embedded for every resume.
+
+---
+
 ## Progress Tracker
 
 | Step | Status | File |
@@ -759,7 +868,7 @@ Compare to a chain (LangChain): each step passes output to the next as a simple 
 | 1.7 Embedder | ✅ Done | `app/rag/embedder.py` |
 | 1.8 Vector Store | ✅ Done | `app/rag/vector_store.py` |
 | 2.1 State design | ✅ Done | `app/graph/state.py` |
-| 2.2 Resume Analyser Agent | ⬜ Pending | `app/graph/agents/resume_analyser.py` |
+| 2.2 Resume Analyser Agent | ✅ Done | `app/graph/agents/resume_analyser.py` |
 | 2.3 Dynamic Router | ⬜ Pending | `app/graph/agents/router.py` |
 | 2.4 Question Generator | ⬜ Pending | `app/graph/agents/question_generator.py` |
 | 2.5 Salary Agent | ⬜ Pending | `app/graph/agents/salary_agent.py` |

@@ -129,7 +129,7 @@ resume-ai-agent/
 ### Phase 2 — LangGraph Agents
 
 - [x] Step 2.1 — State design (state.py)
-- [ ] Step 2.2 — Resume Analyser Agent
+- [x] Step 2.2 — Resume Analyser Agent
 - [ ] Step 2.3 — Dynamic Router
 - [ ] Step 2.4 — Question Generator Agent
 - [ ] Step 2.5 — Salary + Market Intel Agent
