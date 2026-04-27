@@ -638,6 +638,114 @@ Phase 1 complete. Phase 2 begins: LangGraph agents will call `retrieve_chunks()`
 
 ---
 
+### Step 2.1 — LangGraph State Design
+
+**File(s) created:** `app/graph/state.py`
+
+#### What this step does
+
+Defines `ResumeState` — a single `TypedDict` that is the **shared memory** of the entire LangGraph pipeline. Every agent reads from it and writes back to it. Also provides `create_initial_state()` to build the starting state before any agent runs.
+
+#### What is a TypedDict?
+
+A Python dict with declared keys and types — no extra class machinery, no `__init__`, just a type hint contract. LangGraph requires state to be a TypedDict (or dataclass). It gives IDE autocomplete and type safety on state fields.
+
+```python
+state["skills_found"]   # works — IDE knows it's list[str]
+state["made_up_field"]  # type error caught at dev time
+```
+
+#### Full state structure
+
+```text
+INPUT (set at pipeline entry)
+  session_id       str
+  resume_text      str
+  user_location    str
+  target_company   str | None
+
+VALIDATION (set by validator node)
+  validation_passed  bool
+  missing_fields     list[str]
+
+RAG METADATA (set after chunking + embedding)
+  chunks_count     int
+
+AGENT OUTPUTS
+  resume_issues    list[str]   ← Agent 1: what's wrong with the resume
+  skills_found     list[str]   ← Agent 1: detected skills
+  questions        list[dict]  ← Agent 3: interview questions
+  salary_range     dict        ← Agent 4: salary + market data
+  active_companies list[str]   ← Agent 4: companies hiring now
+
+PIPELINE CONTROL
+  current_step     str
+  error            str | None
+
+FINAL OUTPUT
+  final_report     str | None  ← Agent 5: compiled report
+```
+
+#### Why initialise all fields upfront in `create_initial_state()`?
+
+LangGraph passes the state dict to every node. If `resume_issues` doesn't exist yet when Agent 2 tries to read it, you get a `KeyError`. Initialising everything to empty values (`[]`, `{}`, `None`) means every node can safely read any field without guards.
+
+#### How LangGraph nodes update state
+
+Each node (agent) receives the full state and returns a **partial dict** with only the fields it changed:
+
+```python
+def resume_analyser_node(state: ResumeState) -> dict:
+    # read from state
+    text = state["resume_text"]
+    # ... run analysis ...
+    # return ONLY what changed
+    return {
+        "resume_issues": ["No quantified achievements", "Missing LinkedIn"],
+        "skills_found":  ["Python", "FastAPI", "Docker"],
+        "current_step":  "resume_analysed",
+    }
+```
+
+LangGraph merges this partial dict back into the full state. The unchanged fields stay as-is.
+
+#### AI / LangGraph concept
+
+`ResumeState` is the **single source of truth** for the entire pipeline. This is LangGraph's core design pattern:
+
+```text
+          ┌─────────────────────────────┐
+          │         ResumeState          │
+          │  (all agents read & write)   │
+          └─────────────────────────────┘
+                ↑      ↑      ↑      ↑
+          Agent1  Agent2  Agent3  Agent4
+```
+
+Compare to a chain (LangChain): each step passes output to the next as a simple value. LangGraph's shared state means any agent can access any prior result — Agent 4 can read `skills_found` set by Agent 1.
+
+#### Interview Questions
+
+1. **"What is a TypedDict and why does LangGraph use it?"**
+   A TypedDict is a dict with declared key types — gives IDE autocomplete and type safety without runtime overhead. LangGraph uses it because state is fundamentally a dict that gets serialized, checkpointed, and passed between nodes.
+
+2. **"How does LangGraph merge state updates?"**
+   Each node returns a partial dict. LangGraph shallow-merges it into the existing state. Lists and dicts are replaced (not appended) unless you explicitly use `Annotated[list, operator.add]` as the field type with a reducer.
+
+3. **"What is `str | None` in Python?"**
+   Union type — the field can be either a string or None. Equivalent to `Optional[str]` from `typing`. Available since Python 3.10. Used for optional fields like `target_company` and `error`.
+
+4. **"Why `list[dict]` for `questions` instead of a Pydantic model?"**
+   State fields need to be JSON-serializable for LangGraph checkpointing. A plain dict is always serializable. A Pydantic model would need custom serialization. For state, plain types win.
+
+5. **"What is `current_step` used for?"**
+   Tracks which node last ran. Written to SQLite via `update_session_status()` so the `/status` API can show live progress to the frontend: "validating" → "chunking" → "analysing" → "generating questions" → "completed".
+
+6. **"What is the difference between LangGraph state and LangChain chain output?"**
+   LangChain chain: output of step N is the input to step N+1 — linear, one value flows through. LangGraph state: all agents share one dict — any agent can read any field from any prior step. State enables non-linear flows (parallel nodes, conditional edges, loops).
+
+---
+
 ## Progress Tracker
 
 | Step | Status | File |
@@ -650,7 +758,7 @@ Phase 1 complete. Phase 2 begins: LangGraph agents will call `retrieve_chunks()`
 | 1.6 Chunker | ✅ Done | `app/rag/chunker.py` |
 | 1.7 Embedder | ✅ Done | `app/rag/embedder.py` |
 | 1.8 Vector Store | ✅ Done | `app/rag/vector_store.py` |
-| 2.1 State design | ⬜ Pending | `app/graph/state.py` |
+| 2.1 State design | ✅ Done | `app/graph/state.py` |
 | 2.2 Resume Analyser Agent | ⬜ Pending | `app/graph/agents/resume_analyser.py` |
 | 2.3 Dynamic Router | ⬜ Pending | `app/graph/agents/router.py` |
 | 2.4 Question Generator | ⬜ Pending | `app/graph/agents/question_generator.py` |
