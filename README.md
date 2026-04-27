@@ -130,7 +130,7 @@ resume-ai-agent/
 
 - [x] Step 2.1 — State design (state.py)
 - [x] Step 2.2 — Resume Analyser Agent
-- [ ] Step 2.3 — Dynamic Router
+- [x] Step 2.3 — Dynamic Router
 - [ ] Step 2.4 — Question Generator Agent
 - [ ] Step 2.5 — Salary + Market Intel Agent
 - [ ] Step 2.6 — Report Compiler Agent

@@ -855,6 +855,114 @@ This pattern repeats for every agent in this project — the difference is the q
 
 ---
 
+### Step 2.3 — Dynamic Router
+
+**File(s) created:** `app/graph/agents/router.py`
+
+#### What this step does
+
+The router is **not a node** that runs work — it's a set of **decision functions** that examine the current `ResumeState` and return the **name** of the next node to execute. LangGraph calls these functions on conditional edges and routes the flow accordingly.
+
+This file contains 4 router functions, one per decision point:
+
+| Function | Called after | Possible next nodes |
+|---|---|---|
+| `route_after_validation()` | validator node | `analyse` or `end` |
+| `route_after_analysis()` | resume analyser | `generate_questions` or `end` |
+| `route_after_questions()` | question generator | `fetch_salary`, `compile_report`, or `end` |
+| `route_after_salary()` | salary agent | `compile_report` or `end` |
+
+#### Why "dynamic"?
+
+A static graph has hard-coded edges — node A always goes to node B. A dynamic router examines runtime state and picks the next node based on actual data:
+
+- Validation failed? → skip everything, end pipeline early
+- No skills detected? → skip the expensive salary agent (web search would be wasteful)
+- LLM error in any node? → bail out gracefully
+
+This is what makes LangGraph more powerful than a simple chain — flow control based on data.
+
+#### Why use string constants for route labels?
+
+```python
+ROUTE_END        = "end"
+ROUTE_ANALYSE    = "analyse"
+ROUTE_QUESTIONS  = "generate_questions"
+```
+
+The router returns a string that LangGraph maps to a node name in `add_conditional_edges()`. Using constants instead of magic strings prevents typos. If you typo `"generate_questoins"` in the router, it silently routes to nowhere. Constants give one place to change names and IDE autocomplete.
+
+#### How LangGraph uses these routers
+
+In Step 2.7 (graph_builder.py) we'll wire them up like this:
+
+```python
+graph.add_conditional_edges(
+    "validator",                    # FROM node
+    route_after_validation,          # router function
+    {                                # mapping: return value → next node
+        ROUTE_ANALYSE: "resume_analyser",
+        ROUTE_END:     END,
+    },
+)
+```
+
+The router function gets the current state, returns a label, LangGraph looks up the label in the mapping, and executes that node next.
+
+#### The "skip salary if no skills" branch
+
+```python
+def route_after_questions(state):
+    if not state["skills_found"]:
+        return ROUTE_REPORT  # skip salary
+    return ROUTE_SALARY
+```
+
+The salary agent uses web search to find market rates. If we don't know the candidate's skills (e.g., the resume was unparseable), the search query has nothing meaningful to ask. Skipping saves ~15 seconds and avoids garbage results.
+
+#### Why every router checks `state.get("error")`?
+
+Defensive routing. If any prior agent set `error` in the state (e.g., an LLM call failed), every router short-circuits to `ROUTE_END`. This means **one error stops the pipeline** instead of cascading bad data through the remaining agents.
+
+#### AI / LangGraph concept
+
+This is the **conditional edge** pattern — the core of LangGraph. The graph isn't a fixed pipeline; it's a state machine where transitions depend on state values. Router functions are pure (no side effects, just read state and return a label).
+
+```text
+                ┌──────────────┐
+                │  validator   │
+                └──────┬───────┘
+                       │
+              route_after_validation(state)
+                       │
+                ┌──────┴───────┐
+              "end"          "analyse"
+                ↓                ↓
+              END         resume_analyser
+```
+
+#### Interview Questions
+
+1. **"What is a conditional edge in LangGraph?"**
+   An edge whose target depends on a runtime function. `add_conditional_edges(from_node, router_fn, mapping)` — LangGraph calls `router_fn(state)`, gets a string label, and looks up the next node in `mapping`.
+
+2. **"What's the difference between a node and a router?"**
+   A node does work (calls an LLM, queries a DB, transforms data) and returns a partial state update. A router does no work — it reads state and returns a string label naming the next node. Routers are pure functions.
+
+3. **"Why don't routers update state?"**
+   Routers should be deterministic and side-effect-free so the graph's flow logic is transparent. If a router needed to update state, that work belongs in a node that runs *before* the router.
+
+4. **"What if a router returns a label that's not in the mapping?"**
+   LangGraph raises an error at runtime. This is why we use `ROUTE_*` string constants — typos are caught by the IDE before runtime.
+
+5. **"How does the router help error handling?"**
+   Each router checks `state.get("error")` first. If any prior agent set the error field, the router short-circuits to `ROUTE_END`. This stops a single failure from cascading bad data through 4 more LLM calls.
+
+6. **"Could you replace this with a chain instead?"**
+   Yes, for the happy path. But chains can't conditionally skip nodes (e.g., skip salary when no skills) without manual `if` statements inside each step. LangGraph routers make these decisions explicit and testable.
+
+---
+
 ## Progress Tracker
 
 | Step | Status | File |
@@ -869,7 +977,7 @@ This pattern repeats for every agent in this project — the difference is the q
 | 1.8 Vector Store | ✅ Done | `app/rag/vector_store.py` |
 | 2.1 State design | ✅ Done | `app/graph/state.py` |
 | 2.2 Resume Analyser Agent | ✅ Done | `app/graph/agents/resume_analyser.py` |
-| 2.3 Dynamic Router | ⬜ Pending | `app/graph/agents/router.py` |
+| 2.3 Dynamic Router | ✅ Done | `app/graph/agents/router.py` |
 | 2.4 Question Generator | ⬜ Pending | `app/graph/agents/question_generator.py` |
 | 2.5 Salary Agent | ⬜ Pending | `app/graph/agents/salary_agent.py` |
 | 2.6 Report Compiler | ⬜ Pending | `app/graph/agents/report_compiler.py` |
