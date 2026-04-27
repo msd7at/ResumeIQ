@@ -1337,6 +1337,164 @@ After this node, the pipeline ends — `current_step = "report_compiled"`. The g
 
 ---
 
+### Step 2.7 — Graph Builder
+
+**File(s) created:** `app/graph/graph_builder.py`
+
+#### What this step does
+
+Wires all 6 LangGraph nodes + 4 conditional routers into a single compiled state machine. This is the **Phase 2 finale** — the moment all the agent files connect into one runnable pipeline.
+
+#### The compiled graph topology
+
+```text
+[START]
+   |
+   v
+validator                     ← guard node (Phase 1 validator wrapped)
+   |
+   v   route_after_validation
+   |---> END                  if validation_passed = False
+   |---> embedding            if valid (chunk + embed + store in ChromaDB)
+              |
+              v
+          resume_analyser     ← Agent 1
+              |
+              v   route_after_analysis
+              |---> END
+              |---> question_generator   ← Agent 3 (15+5+5)
+                            |
+                            v   route_after_questions
+                            |---> END
+                            |---> report_compiler  if skills_found is empty
+                            |---> salary_agent     ← Agent 4
+                                       |
+                                       v   route_after_salary
+                                       |---> END
+                                       |---> report_compiler   ← Agent 5
+                                                   |
+                                                   v
+                                                 [END]
+```
+
+#### What lives in graph_builder.py vs elsewhere
+
+| Lives in graph_builder.py | Lives elsewhere |
+|---|---|
+| `validator_node` — thin wrapper around `validate_resume()` | The agents themselves (`resume_analyser_node`, etc.) |
+| `embedding_node` — chunk + embed + store orchestration | The pure functions (`chunk_resume`, `embed_chunks`, `store_embeddings`) |
+| `build_graph()` — wiring | Router functions (`app/graph/agents/router.py`) |
+| `get_graph()` — compiled singleton | State definition (`app/graph/state.py`) |
+
+The two wrapper nodes (`validator_node`, `embedding_node`) are **graph plumbing** — they translate `state["x"]` in/out of pure RAG functions. They don't belong in `app/rag/` because that folder stays graph-agnostic.
+
+#### Why parsing lives OUTSIDE the graph
+
+The API handler (`/upload`) parses the file into text and pre-populates `state["resume_text"]` before invoking the graph. The graph itself starts at the validator with text already available.
+
+Reasoning: file-extension dispatch (PDF vs DOCX) is purely an HTTP-layer concern. Putting it in the graph would force the graph to handle a `file_path` field that's only relevant for one node. Cleaner to keep the graph focused on analysis.
+
+#### Why the embedding step is INSIDE the graph
+
+The validator is a **guard** — it only makes sense to chunk+embed AFTER validation passes. Putting embedding in the graph means a failed validation never wastes time on the expensive embedding step. The `route_after_validation` edge is what enforces this skip-on-fail behaviour.
+
+#### The `add_conditional_edges` mapping pattern
+
+```python
+graph.add_conditional_edges(
+    "question_generator",            # FROM node
+    route_after_questions,            # router function
+    {                                 # mapping: router's return value → actual next node
+        ROUTE_SALARY: "salary_agent",
+        ROUTE_REPORT: "report_compiler",
+        ROUTE_END:    END,
+    },
+)
+```
+
+The router returns a label string. The mapping translates the label into the actual node name. This decoupling means you can rename the router's labels OR rename the graph nodes without breaking the other side.
+
+#### The lazy singleton — `get_graph()`
+
+```python
+_compiled_graph = None
+
+def get_graph():
+    global _compiled_graph
+    if _compiled_graph is None:
+        _compiled_graph = build_graph()
+    return _compiled_graph
+```
+
+`graph.compile()` is not free — it walks the node/edge map, validates everything, builds runtime structures. Doing this once per request is wasteful. The singleton compiles on first call and reuses the compiled graph for every subsequent invocation. This is the standard pattern for FastAPI apps that use LangGraph.
+
+#### How the API will use this (preview of Phase 4)
+
+```python
+from app.graph.graph_builder import get_graph
+from app.graph.state import create_initial_state
+
+# In the /analyse endpoint:
+state = create_initial_state(
+    session_id=session_id,
+    resume_text=parsed_text,             # API parsed the file
+    user_location=request.location,
+    target_company=request.target_company,
+)
+final_state = get_graph().invoke(state)
+return {"report": final_state["final_report"]}
+```
+
+That's the entire integration — 5 lines.
+
+#### Phase 2 — COMPLETE
+
+```text
+[State Design]              ✓  state.py — ResumeState TypedDict
+[Resume Analyser Agent]     ✓  Agent 1 — RAG + LLM
+[Dynamic Router]            ✓  4 conditional decision functions
+[Question Generator]        ✓  Agent 3 — 25 questions in 3 sub-agents
+[Salary + Market Intel]     ✓  Agent 4 — salary + active companies
+[Report Compiler]           ✓  Agent 5 — markdown report assembly
+[Graph Builder]             ✓  All 6 agents wired into a state machine
+```
+
+What's next: Phase 3 (web search tool + integrations), Phase 4 (FastAPI endpoints), Phase 5 (frontend).
+
+#### AI / LangGraph concept
+
+This file demonstrates the **complete LangGraph pattern**:
+
+1. **State definition** — TypedDict (`ResumeState`)
+2. **Nodes** — functions that take state, return partial state updates
+3. **Routers** — functions that take state, return next-node labels
+4. **Edges** — wiring (linear or conditional)
+5. **Compile** — turns the declarative graph into a runnable executor
+
+The key insight: the graph is **data**, not code. You declare the topology (nodes + edges), then `.compile()` turns it into an executable. This declarative style means you can visualise the graph (`graph.get_graph().draw_mermaid_png()`), checkpoint state, time-travel debug, and add observability — all because the structure is inspectable, not buried in `if/else`.
+
+#### Interview Questions
+
+1. **"Walk me through what happens when `.invoke(state)` is called."**
+   LangGraph starts at the entry point (`validator`), runs the node, takes the partial dict it returns, merges it into state, then evaluates the conditional edge router. The router returns a label, LangGraph maps that label to the next node, runs it, and continues until a node hands off to `END`. Each transition updates `current_step` so the frontend can show progress.
+
+2. **"Why is `embedding` inside the graph but `parsing` outside?"**
+   Embedding is conditional on validation — it should only run if the resume is worth processing, and the validator's conditional edge enforces that. Parsing is purely a file-format concern (PDF vs DOCX dispatch) and isn't conditional on anything else, so it lives in the API handler before the graph runs.
+
+3. **"What does the lazy singleton in `get_graph()` solve?"**
+   `graph.compile()` is not free — it walks the topology, validates edges, builds runtime structures. Doing this on every API request would add latency and waste CPU. The singleton compiles once at first call and reuses the compiled object across all subsequent invocations.
+
+4. **"Can the graph run multiple resumes concurrently?"**
+   Yes — the compiled graph is stateless. Each `.invoke(state)` call carries its own `ResumeState`. ChromaDB filters by `session_id`, so two simultaneous invocations don't bleed into each other. FastAPI's async event loop handles concurrent requests; the graph happily runs them in parallel as long as Ollama can serve concurrent inference requests.
+
+5. **"What if Ollama is down — what does the graph do?"**
+   Each agent's LLM call would raise an exception. Currently the graph propagates that — the API handler catches it and returns a 503. A more robust design would catch the exception inside each node and set `state['error']`, which the routers already check via `state.get("error")` to short-circuit to END. Adding that try/except is a Phase 5 hardening task.
+
+6. **"Why are the conditional edge mappings dicts instead of lists?"**
+   The router returns a string label (e.g., `ROUTE_SALARY = "fetch_salary"`). The mapping `{ROUTE_SALARY: "salary_agent", ...}` translates that label into the actual node name. The dict pattern decouples router labels from graph node names — you can rename either side without breaking the other.
+
+---
+
 ## Progress Tracker
 
 | Step | Status | File |
@@ -1355,7 +1513,7 @@ After this node, the pipeline ends — `current_step = "report_compiled"`. The g
 | 2.4 Question Generator | ✅ Done | `app/graph/agents/question_generator.py` |
 | 2.5 Salary Agent | ✅ Done | `app/graph/agents/salary_agent.py` |
 | 2.6 Report Compiler | ✅ Done | `app/graph/agents/report_compiler.py` |
-| 2.7 Graph Builder | ⬜ Pending | `app/graph/graph_builder.py` |
+| 2.7 Graph Builder | ✅ Done | `app/graph/graph_builder.py` |
 | 3.1 DuckDuckGo Tool | ⬜ Pending | `app/tools/web_search.py` |
 | 3.2 Company Q Integration | ⬜ Pending | — |
 | 3.3 Salary Integration | ⬜ Pending | — |

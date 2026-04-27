@@ -134,7 +134,7 @@ resume-ai-agent/
 - [x] Step 2.4 — Question Generator Agent
 - [x] Step 2.5 — Salary + Market Intel Agent
 - [x] Step 2.6 — Report Compiler Agent
-- [ ] Step 2.7 — Graph Builder
+- [x] Step 2.7 — Graph Builder
 
 ### Phase 3 — Web Search Integration
 
