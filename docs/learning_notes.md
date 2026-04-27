@@ -281,6 +281,471 @@ This is the **abstraction boundary** — the rest of the pipeline doesn't know o
 
 ---
 
+### Step 1.5 — Resume Validator
+
+**File(s) created:** `app/rag/validator.py`
+
+#### What this step does
+
+Scans the extracted resume text and checks whether critical fields are present. Returns a `ValidationResult` with three pieces of info:
+
+- `is_valid` — `True` only if all mandatory fields are found
+- `missing_fields` — list of things that are definitely absent (email, phone, sections)
+- `warnings` — things that are absent but optional (projects, summary)
+
+If `is_valid` is `False`, the LangGraph pipeline sets the session status to `validation_failed` and stops — no point embedding an incomplete resume.
+
+#### What is checked
+
+| Check | Type | Logic used |
+|---|---|---|
+| Email address | Mandatory | Regex `[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}` |
+| Phone number | Mandatory | Regex for digit patterns with optional `+`, spaces, dashes |
+| Skills section | Mandatory | Keyword match: "skill", "technologies", "tech stack", "tools" |
+| Experience section | Mandatory | Keyword match: "experience", "employment", "work history" |
+| Education section | Mandatory | Keyword match: "education", "degree", "university", "college" |
+| Projects section | Warning | Keyword match: "project", "portfolio" |
+| Summary section | Warning | Keyword match: "summary", "objective", "profile", "about" |
+| Word count < 50 | Mandatory | Resume too short — probably parse failure |
+| Word count < 150 | Warning | Resume seems thin |
+
+#### Why regex for email/phone?
+
+These are structured patterns — regex is the right tool. LLM would be overkill (slow, non-deterministic) for detecting whether an email address exists.
+
+#### Why keyword matching for sections?
+
+Resume headings vary wildly: "Work Experience", "Professional Experience", "Employment History", "Career" — all mean the same thing. A keyword list covers the real-world variation without needing an LLM.
+
+#### The `@dataclass` + `field(default_factory=list)` pattern
+
+```python
+@dataclass
+class ValidationResult:
+    is_valid: bool
+    missing_fields: list[str] = field(default_factory=list)
+```
+
+`field(default_factory=list)` is required for mutable defaults in dataclasses. If you wrote `missing_fields: list = []` directly, Python would share the same list object across all instances — a classic Python gotcha.
+
+#### AI / LangGraph concept
+
+This is a **guard node** in the LangGraph pipeline. Before the expensive RAG steps (chunking, embedding), we validate that the input is worth processing. If validation fails, the graph routes to an early exit:
+
+```text
+[parse_pdf / parse_docx]
+        ↓
+  [validate_resume]  ←── Step 1.5
+     ↓          ↓
+  valid      invalid
+    ↓            ↓
+[chunker]   status = "validation_failed"
+                ↓
+         return error to frontend
+```
+
+This is the **conditional edge** pattern in LangGraph — one node, two possible next nodes depending on state.
+
+#### Interview Questions
+
+1. **"Why validate before chunking/embedding?"**
+   Embedding is the slowest step (calls Ollama for each chunk). No point running it on a resume with no email or no skills section — we catch bad input early and save time.
+
+2. **"Why not use the LLM to detect missing fields?"**
+   Regex and keyword matching are deterministic, instant, and free. LLMs are probabilistic, slow (local inference = seconds), and have no advantage here. Use LLMs for judgment calls; use rules for pattern matching.
+
+3. **"What is a Python dataclass?"**
+   A class decorator that auto-generates `__init__`, `__repr__`, `__eq__` based on declared fields. Cleaner than a plain dict for structured return values — fields have names, types, and IDE autocomplete.
+
+4. **"Why `field(default_factory=list)` instead of `= []`?"**
+   Mutable default arguments in Python are shared across all instances. `field(default_factory=list)` tells the dataclass to call `list()` fresh for each new instance. Classic Python gotcha.
+
+5. **"What happens in the pipeline when validation fails?"**
+   `is_valid = False` → agent sets `session.status = "validation_failed"` in SQLite → LangGraph router sends to an early exit node → `/status` API returns the missing fields to the frontend → user sees "Please add your email and skills section".
+
+6. **"How would you extend this validator?"**
+   Add LinkedIn URL check, GitHub URL check, detect if dates are missing from experience entries, check if job titles are present, detect very generic skills ("Microsoft Office") that weaken a tech resume.
+
+---
+
+### Step 1.6 — Smart Sectional Chunker
+
+**File(s) created:** `app/rag/chunker.py`
+
+#### What this step does
+
+Splits the raw resume text (one long string) into small focused **chunks** that each get embedded as a separate vector. Each chunk knows which section it came from.
+
+Output: list of `Chunk` dataclass objects, each with:
+- `section` — e.g. `"SKILLS"`, `"EXPERIENCE"`, `"HEADER"`
+- `text` — content prefixed with `[SECTION]` label
+- `chunk_index` — position in resume (0-based)
+- `metadata` — dict stored in ChromaDB alongside the vector
+
+#### Why chunk at all?
+
+LLMs and embedding models have a **context window limit**. More importantly, if the whole resume is one vector, it blends all topics. A query like "what Python skills does this person have?" needs only the `SKILLS` chunk — not the entire resume mixed together.
+
+#### Two-level splitting strategy
+
+```text
+Level 1 — Section detection  (semantic boundary)
+  Lines like "EXPERIENCE", "Skills", "Education" → split here
+  Each section = its own group of lines
+
+Level 2 — Size cap  (MAX_CHUNK_CHARS = 800)
+  If a section is > 800 chars → split further
+  Last OVERLAP_LINES (2) carried over to next chunk for context continuity
+```
+
+#### Why section-aware vs fixed-size chunking?
+
+| Strategy | Problem |
+|---|---|
+| Fixed size (every 500 chars) | Splits mid-sentence, mixes sections randomly |
+| Recursive splitter | Better, but still section-unaware |
+| **Section-aware (this approach)** | Natural boundaries = coherent chunks = better retrieval |
+
+In a resume, sections ARE the natural semantic boundaries.
+
+#### The `[SECTION]` prefix
+
+Each chunk text starts with `[EXPERIENCE]` or `[SKILLS]`. This tells the LLM which part of the resume it's reading when a chunk is retrieved and injected into a prompt.
+
+#### Overlap (`OVERLAP_LINES = 2`)
+
+Last 2 lines of a chunk repeat at the start of the next chunk within the same section. Prevents a sentence being cut in half — the model always has surrounding context.
+
+#### AI / LangGraph concept
+
+Chunking is **Stage 2** of the RAG pipeline:
+
+```text
+[Document Ingestion]  ← Steps 1.3–1.4
+        ↓
+   [Chunking]         ← Step 1.6 ✅
+        ↓
+   [Embedding]        ← Step 1.7
+        ↓
+  [Vector Store]      ← Step 1.8
+```
+
+Chunk quality = retrieval quality = LLM answer quality. This is called **chunk granularity** — one of the most critical RAG design decisions.
+
+#### Interview Questions
+
+1. **"Why not send the whole resume to the LLM?"**
+   Local LLMs have a limited context window (~8K tokens). More importantly, a focused chunk gives the LLM exactly what it needs — sending 2000 words when only 200 are relevant dilutes answer quality.
+
+2. **"What is chunk overlap and why use it?"**
+   Repeating the last N lines at the start of the next chunk avoids cutting a sentence across two chunks where neither chunk has full meaning. Without overlap, "Led a team of 5 engineers" could be split and both halves lose context.
+
+3. **"Fixed-size vs semantic chunking — which is better?"**
+   Semantic (section-aware) is better for structured documents like resumes where sections have clear meaning. Fixed-size is simpler but can mix unrelated content in one chunk.
+
+4. **"What goes into the `metadata` dict?"**
+   `session_id` and `section`. ChromaDB stores this alongside the vector. Agents can then filter: "retrieve only SKILLS chunks for session XYZ" — not all chunks from all resumes.
+
+5. **"How did you pick `MAX_CHUNK_CHARS = 800`?"**
+   Empirical — a typical resume section (skills list, one job entry) fits in 300–600 chars. 800 allows a full experience entry with bullet points without arbitrary cuts. Too small = too many noisy chunks. Too large = embeddings lose focus.
+
+6. **"How would you improve this chunker?"**
+   Use spaCy for sentence segmentation at sub-section level. Detect bullet points as natural sub-boundaries. Add page number metadata. Use LLM-based section detection for non-standard headings.
+
+---
+
+### Step 1.7 — Ollama Embeddings
+
+**File(s) created:** `app/rag/embedder.py`
+
+#### What this step does
+
+Takes the list of `Chunk` objects produced by the chunker and converts each chunk's text into a **vector** (a list of floating-point numbers) using Ollama's `nomic-embed-text` model running locally. Also provides a second function to embed a single query string at retrieval time.
+
+Two functions:
+
+```python
+embed_chunks(chunks)  → list of dicts ready to insert into ChromaDB
+embed_query(query)    → single list[float] used at search time
+```
+
+#### What is an embedding?
+
+An embedding is a list of numbers that encodes the **meaning** of a piece of text. `nomic-embed-text` produces 768-dimensional vectors (768 floats per chunk).
+
+Texts that are semantically similar → vectors that are close together in 768-dimensional space. This is what makes similarity search possible — ChromaDB finds the chunks whose vectors are closest to the query vector.
+
+```text
+"Python developer with FastAPI experience"
+       ↓  nomic-embed-text
+[0.021, -0.134, 0.887, ... 768 numbers total]
+```
+
+#### Why two separate functions?
+
+| Function | When called | Input |
+|---|---|---|
+| `embed_chunks()` | Upload time — once per resume | list of Chunk objects |
+| `embed_query()` | Every agent question | single string |
+
+At upload time you embed all chunks and store them. At query time you embed just the question and find similar stored chunks. The model must be the same for both — you can't compare vectors from different models.
+
+#### What `embed_chunks()` returns
+
+Each dict in the list has exactly what ChromaDB needs:
+
+```python
+{
+    "id":        "sess_a1b2c3_4",      # unique — session + chunk index
+    "text":      "[SKILLS]\nPython ...", # original chunk text
+    "embedding": [0.021, -0.134, ...],  # 768 floats
+    "metadata":  {"session_id": "...", "section": "SKILLS"}
+}
+```
+
+The `id` is `{session_id}_{chunk_index}` — unique per session so two different resumes don't collide in ChromaDB.
+
+#### Why Ollama / nomic-embed-text?
+
+| Option | Cost | Privacy | Speed |
+|---|---|---|---|
+| OpenAI text-embedding-3 | Paid per token | Resume data leaves machine | Fast (network) |
+| **nomic-embed-text (Ollama)** | Free | Fully local | Fast (local GPU/CPU) |
+| sentence-transformers | Free | Local | Needs separate Python model |
+
+`nomic-embed-text` is specifically optimized for retrieval tasks and produces high-quality 768-dim vectors. It's the standard choice for local RAG setups.
+
+#### AI / LangGraph concept
+
+Embedding is **Stage 3** of the RAG pipeline:
+
+```text
+[Ingestion]   ✅  parse_pdf / parse_docx
+[Validation]  ✅  validate_resume
+[Chunking]    ✅  chunk_resume
+[Embedding]   ✅  embed_chunks / embed_query  ← Step 1.7
+[Vector DB]   ⏳  Step 1.8
+```
+
+`embed_query()` is called at **retrieval time** by the agents in Phase 2. The query "what Python skills does this person have?" gets embedded, ChromaDB finds the nearest chunk vectors, and those chunks are injected into the LLM prompt.
+
+#### Interview Questions
+
+1. **"What is an embedding?"**
+   A fixed-length list of floats that represents the semantic meaning of text. Similar meanings → similar vectors. Produced by an encoder model, not a generative LLM.
+
+2. **"What is nomic-embed-text? Why 768 dimensions?"**
+   An open-source embedding model optimized for retrieval. 768 is the output size of the model's encoder — each dimension captures some aspect of meaning. OpenAI's `text-embedding-3-small` uses 1536 dims. More dims ≠ always better.
+
+3. **"Why must `embed_query` use the same model as `embed_chunks`?"**
+   Different models produce vectors in completely different spaces. Comparing a nomic vector with an OpenAI vector is meaningless — like comparing temperatures in Celsius and Fahrenheit without converting.
+
+4. **"What is cosine similarity?"**
+   The standard metric for comparing embedding vectors. Measures the angle between two vectors (not their length). Value ranges from -1 to 1; closer to 1 = more similar in meaning. ChromaDB uses this by default.
+
+5. **"Why is `embed_query` called at every agent question but `embed_chunks` only once?"**
+   Chunks are static — a resume doesn't change after upload. Queries change every time an agent asks a new question. Embedding is fast (~50ms locally) but there's no point re-embedding the same chunks repeatedly.
+
+6. **"What would happen if you sent the whole resume as one embedding instead of chunks?"**
+   One 768-dim vector would represent everything — Python skills, Java history, education, hobbies — blended together. A query about Python would get diluted by all the other content. Chunked embeddings give precise, focused retrieval.
+
+---
+
+### Step 1.8 — ChromaDB Vector Store
+
+**File(s) created:** `app/rag/vector_store.py`
+
+#### What this step does
+
+Wraps ChromaDB operations into 4 clean functions. This is where vectors go to live on disk and where agents come to search.
+
+| Function | Purpose |
+|---|---|
+| `store_embeddings(embedded_chunks)` | Bulk insert chunks+vectors into ChromaDB |
+| `retrieve_chunks(query_embedding, session_id, ...)` | Top-n similarity search for a query |
+| `delete_session(session_id)` | Remove all chunks for a session (re-upload cleanup) |
+| `count_chunks(session_id)` | How many chunks stored for a session |
+
+#### ChromaDB internals
+
+ChromaDB stores 3 things per entry:
+1. **`id`** — unique string identifier
+2. **`document`** — the original text (chunk text with `[SECTION]` prefix)
+3. **`embedding`** — the 768-float vector
+4. **`metadata`** — dict (`session_id`, `section`) for filtering
+
+It uses an **HNSW index** (Hierarchical Navigable Small World) for approximate nearest-neighbor search — fast even with millions of vectors.
+
+#### Why `"hnsw:space": "cosine"`?
+
+ChromaDB defaults to `l2` (Euclidean distance). We set it to `cosine` explicitly because:
+- Cosine measures the **angle** between vectors — captures semantic similarity regardless of vector magnitude
+- `l2` measures raw distance — can rank long-text vectors differently than short-text vectors even if meanings are similar
+- For NLP embeddings, cosine is the standard choice
+
+**Important:** Once a collection is created with a distance metric, you can't change it. Always specify `cosine` upfront.
+
+#### Why always filter by `session_id`?
+
+Multiple users upload different resumes. Without the filter, a question about "Python skills" could retrieve chunks from a completely different person's resume. The `session_id` filter scopes every query to one resume only.
+
+```python
+where = {"session_id": session_id}             # single filter
+where = {"$and": [{"session_id": ...}, {"section": "SKILLS"}]}  # combined filter
+```
+
+#### `PersistentClient` vs `Client`
+
+| Client | Storage | Use case |
+|---|---|---|
+| `chromadb.Client()` | In-memory only | Testing, throwaway |
+| `chromadb.PersistentClient(path=...)` | On disk at `path` | Production, this project |
+| `chromadb.HttpClient(host=...)` | Remote server | Distributed/cloud |
+
+We use `PersistentClient` — data survives restarts, stored at `./data/chroma_db`.
+
+#### Complete RAG pipeline — all 5 stages done
+
+```text
+[Ingestion]   ✅  parse_pdf() / parse_docx()
+[Validation]  ✅  validate_resume()
+[Chunking]    ✅  chunk_resume()
+[Embedding]   ✅  embed_chunks() / embed_query()
+[Vector DB]   ✅  store_embeddings() / retrieve_chunks()
+```
+
+Phase 1 complete. Phase 2 begins: LangGraph agents will call `retrieve_chunks()` + `embed_query()` to power RAG-based resume analysis.
+
+#### Interview Questions
+
+1. **"What is ChromaDB? Why not Pinecone?"**
+   ChromaDB is a local, embedded vector database — zero setup, no account, stores data on disk. Pinecone is a managed cloud service. For a local/portfolio project, ChromaDB is the right choice — no API keys, no cost, no internet.
+
+2. **"What is HNSW?"**
+   Hierarchical Navigable Small World — a graph-based approximate nearest-neighbor algorithm. Instead of comparing a query vector to every stored vector (brute force), HNSW navigates a layered graph to find similar vectors in `O(log n)` time. It's the standard index for production vector databases.
+
+3. **"Why cosine similarity over Euclidean distance for text?"**
+   Cosine measures the angle between vectors — two texts can have the same meaning regardless of their length. A short phrase and a long paragraph about Python can score high cosine similarity. Euclidean distance is influenced by vector magnitude, which can vary with text length.
+
+4. **"What does `include=[]` do in `count_chunks`?"**
+   Tells ChromaDB not to return documents, embeddings, or metadatas — just the IDs. This makes the call faster since we only need the count, not the actual content.
+
+5. **"What happens if two resumes are stored for the same session_id?"**
+   Old and new chunks would both exist with the same `session_id`. That's why `delete_session()` is called before re-embedding on re-upload — it clears old vectors first. Otherwise retrieval would get results from both the old and new resume.
+
+6. **"How would you scale this to production?"**
+   Replace `PersistentClient` with `HttpClient` pointing to a dedicated ChromaDB server (or Weaviate/Qdrant/Pinecone). The `retrieve_chunks` and `store_embeddings` interface stays the same — only the client changes. This is why the client is created in `_get_collection()` and not passed in — easy to swap.
+
+---
+
+### Step 2.1 — LangGraph State Design
+
+**File(s) created:** `app/graph/state.py`
+
+#### What this step does
+
+Defines `ResumeState` — a single `TypedDict` that is the **shared memory** of the entire LangGraph pipeline. Every agent reads from it and writes back to it. Also provides `create_initial_state()` to build the starting state before any agent runs.
+
+#### What is a TypedDict?
+
+A Python dict with declared keys and types — no extra class machinery, no `__init__`, just a type hint contract. LangGraph requires state to be a TypedDict (or dataclass). It gives IDE autocomplete and type safety on state fields.
+
+```python
+state["skills_found"]   # works — IDE knows it's list[str]
+state["made_up_field"]  # type error caught at dev time
+```
+
+#### Full state structure
+
+```text
+INPUT (set at pipeline entry)
+  session_id       str
+  resume_text      str
+  user_location    str
+  target_company   str | None
+
+VALIDATION (set by validator node)
+  validation_passed  bool
+  missing_fields     list[str]
+
+RAG METADATA (set after chunking + embedding)
+  chunks_count     int
+
+AGENT OUTPUTS
+  resume_issues    list[str]   ← Agent 1: what's wrong with the resume
+  skills_found     list[str]   ← Agent 1: detected skills
+  questions        list[dict]  ← Agent 3: interview questions
+  salary_range     dict        ← Agent 4: salary + market data
+  active_companies list[str]   ← Agent 4: companies hiring now
+
+PIPELINE CONTROL
+  current_step     str
+  error            str | None
+
+FINAL OUTPUT
+  final_report     str | None  ← Agent 5: compiled report
+```
+
+#### Why initialise all fields upfront in `create_initial_state()`?
+
+LangGraph passes the state dict to every node. If `resume_issues` doesn't exist yet when Agent 2 tries to read it, you get a `KeyError`. Initialising everything to empty values (`[]`, `{}`, `None`) means every node can safely read any field without guards.
+
+#### How LangGraph nodes update state
+
+Each node (agent) receives the full state and returns a **partial dict** with only the fields it changed:
+
+```python
+def resume_analyser_node(state: ResumeState) -> dict:
+    # read from state
+    text = state["resume_text"]
+    # ... run analysis ...
+    # return ONLY what changed
+    return {
+        "resume_issues": ["No quantified achievements", "Missing LinkedIn"],
+        "skills_found":  ["Python", "FastAPI", "Docker"],
+        "current_step":  "resume_analysed",
+    }
+```
+
+LangGraph merges this partial dict back into the full state. The unchanged fields stay as-is.
+
+#### AI / LangGraph concept
+
+`ResumeState` is the **single source of truth** for the entire pipeline. This is LangGraph's core design pattern:
+
+```text
+          ┌─────────────────────────────┐
+          │         ResumeState          │
+          │  (all agents read & write)   │
+          └─────────────────────────────┘
+                ↑      ↑      ↑      ↑
+          Agent1  Agent2  Agent3  Agent4
+```
+
+Compare to a chain (LangChain): each step passes output to the next as a simple value. LangGraph's shared state means any agent can access any prior result — Agent 4 can read `skills_found` set by Agent 1.
+
+#### Interview Questions
+
+1. **"What is a TypedDict and why does LangGraph use it?"**
+   A TypedDict is a dict with declared key types — gives IDE autocomplete and type safety without runtime overhead. LangGraph uses it because state is fundamentally a dict that gets serialized, checkpointed, and passed between nodes.
+
+2. **"How does LangGraph merge state updates?"**
+   Each node returns a partial dict. LangGraph shallow-merges it into the existing state. Lists and dicts are replaced (not appended) unless you explicitly use `Annotated[list, operator.add]` as the field type with a reducer.
+
+3. **"What is `str | None` in Python?"**
+   Union type — the field can be either a string or None. Equivalent to `Optional[str]` from `typing`. Available since Python 3.10. Used for optional fields like `target_company` and `error`.
+
+4. **"Why `list[dict]` for `questions` instead of a Pydantic model?"**
+   State fields need to be JSON-serializable for LangGraph checkpointing. A plain dict is always serializable. A Pydantic model would need custom serialization. For state, plain types win.
+
+5. **"What is `current_step` used for?"**
+   Tracks which node last ran. Written to SQLite via `update_session_status()` so the `/status` API can show live progress to the frontend: "validating" → "chunking" → "analysing" → "generating questions" → "completed".
+
+6. **"What is the difference between LangGraph state and LangChain chain output?"**
+   LangChain chain: output of step N is the input to step N+1 — linear, one value flows through. LangGraph state: all agents share one dict — any agent can read any field from any prior step. State enables non-linear flows (parallel nodes, conditional edges, loops).
+
+---
+
 ## Progress Tracker
 
 | Step | Status | File |
@@ -288,12 +753,12 @@ This is the **abstraction boundary** — the rest of the pipeline doesn't know o
 | 1.1 Project setup | ✅ Done | `requirements.txt`, `.env`, folders |
 | 1.2 SQLite setup | ✅ Done | `app/db/sqlite_client.py` |
 | 1.3 PDF Parser | ✅ Done | `app/rag/pdf_parser.py` |
-| 1.4 DOCX Parser | ⏳ Next | `app/rag/docx_parser.py` |
-| 1.5 Validator | ⬜ Pending | `app/rag/validator.py` |
-| 1.6 Chunker | ⬜ Pending | `app/rag/chunker.py` |
-| 1.7 Embedder | ⬜ Pending | `app/rag/embedder.py` |
-| 1.8 Vector Store | ⬜ Pending | `app/rag/vector_store.py` |
-| 2.1 State design | ⬜ Pending | `app/graph/state.py` |
+| 1.4 DOCX Parser | ✅ Done | `app/rag/docx_parser.py` |
+| 1.5 Validator | ✅ Done | `app/rag/validator.py` |
+| 1.6 Chunker | ✅ Done | `app/rag/chunker.py` |
+| 1.7 Embedder | ✅ Done | `app/rag/embedder.py` |
+| 1.8 Vector Store | ✅ Done | `app/rag/vector_store.py` |
+| 2.1 State design | ✅ Done | `app/graph/state.py` |
 | 2.2 Resume Analyser Agent | ⬜ Pending | `app/graph/agents/resume_analyser.py` |
 | 2.3 Dynamic Router | ⬜ Pending | `app/graph/agents/router.py` |
 | 2.4 Question Generator | ⬜ Pending | `app/graph/agents/question_generator.py` |
