@@ -131,7 +131,7 @@ resume-ai-agent/
 - [x] Step 2.1 — State design (state.py)
 - [x] Step 2.2 — Resume Analyser Agent
 - [x] Step 2.3 — Dynamic Router
-- [ ] Step 2.4 — Question Generator Agent
+- [x] Step 2.4 — Question Generator Agent
 - [ ] Step 2.5 — Salary + Market Intel Agent
 - [ ] Step 2.6 — Report Compiler Agent
 - [ ] Step 2.7 — Graph Builder
@@ -139,8 +139,8 @@ resume-ai-agent/
 ### Phase 3 — Web Search Integration
 
 - [ ] Step 3.1 — DuckDuckGo tool setup
-- [ ] Step 3.2 — Integrate in Company Q Agent
-- [ ] Step 3.3 — Integrate in Salary Agent
+- [ ] Step 3.2 — Integrate in Question Generator (use recent {target_company} interview reports to refresh LLM context — see TODO at top of `question_generator.py`)
+- [ ] Step 3.3 — Integrate in Salary Agent (live salary + active hiring lookups)
 - [ ] Step 3.4 — End to end test
 
 ### Phase 4 — FastAPI Backend

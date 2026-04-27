@@ -963,6 +963,135 @@ This is the **conditional edge** pattern — the core of LangGraph. The graph is
 
 ---
 
+### Step 2.4 — Question Generator Agent
+
+**File(s) created:** `app/graph/agents/question_generator.py`
+
+#### What this step does
+
+Generates **25 interview questions** total across THREE sub-agents inside one LangGraph node:
+
+| Sub-agent | Count | Focus |
+|---|---|---|
+| 3a — Technical | 15 | Skill + company-mandatory topics + coding |
+| 3b — Project | 5 | Specific verification questions on resume claims |
+| 3c — HR / Behavioral | 5 | Tailored to target company's behavioral framework |
+
+#### THE KEY DESIGN RULE — target_company drives everything
+
+**The target company decides the interview style — NOT the resume.**
+
+Example: a candidate with only Python in their resume targets Netflix. Netflix interviews are heavily HLD / LLD / System Design. The agent will STILL generate System Design questions, because that's what the candidate will face on interview day. Resume coverage is secondary.
+
+This is reflected in the prompt's coverage targets:
+
+```text
+~ 50% on target_company's standard topics (resume coverage NOT required)
+~ 40% grounded in candidate's listed skills, framed in target_company's style
+~ 10% market / location supporting questions
+```
+
+Each technical question carries a `covered_in_resume: true|false` flag so the candidate knows where to study extra hard.
+
+#### Company-style cheatsheet baked into the prompt
+
+The technical prompt has a reference cheatsheet for major companies:
+
+| Company tier | Pattern asked |
+|---|---|
+| Netflix | Distributed systems, HLD/LLD, microservices, observability, JVM tuning, fault tolerance |
+| Google / Meta | Algorithms, data structures, large-scale system design, complexity |
+| Amazon | Algorithms + system design + Leadership Principles overlay |
+| Microsoft / Apple | Balanced coding + design + craft / culture-fit |
+| Indian product (Flipkart, Razorpay, Swiggy) | DSA, HLD, LLD, India-scale, payment correctness, latency |
+| Indian services (Infosys, TCS, Wipro) | Fundamentals, project walkthroughs, framework basics |
+| Startups | Ownership, breadth, real production debugging |
+
+Same idea repeats in HR prompt — Amazon → strict Leadership Principles, Google → googliness, etc.
+
+#### Why three sub-agents in ONE node?
+
+Each sub-agent has different prompt, different RAG context, different temperature. Splitting them into 3 LangGraph nodes would require a list reducer (`Annotated[list, operator.add]`) for the `questions` field. Combining them inside one node keeps the graph simpler — graph stays at 6 nodes instead of 8.
+
+The sub-agents run sequentially, but each pass takes ~5–8 seconds locally, so the user sees a single ~25-second "generating questions…" step instead of three separate ones.
+
+#### What's in each generated question
+
+```json
+Technical:
+{
+  "type": "technical", "category": "System Design",
+  "question": "...", "difficulty": "medium",
+  "expected_topics": [...],
+  "code_snippet": "..." | null,
+  "covered_in_resume": true | false,
+  "company_style_match": "...",
+  "market_relevance": "..."
+}
+
+Project:
+{
+  "type": "project", "category": "system design",
+  "question": "...", "difficulty": "medium",
+  "expected_topics": [...],
+  "based_on": "<exact resume line that prompted this question>",
+  "company_style_match": "..."
+}
+
+HR:
+{
+  "type": "hr", "category": "leadership",
+  "question": "...", "difficulty": "medium",
+  "expected_topics": [...],
+  "company_style_match": "..."
+}
+```
+
+#### Phase 3 follow-up — web search enhancement (TO DO)
+
+Currently the agent relies on the LLM's training-time knowledge of company interview patterns. Llama 3.1's cutoff is ~2024 — solid for FAANG and major Indian product companies, stale for niche or newly trending firms.
+
+**When Phase 3 lands**, we'll add web search (`app/tools/web_search.py` via DuckDuckGo) and inject recent results into all three prompts:
+
+```text
+Recent {target_company} interview reports (web search):
+{web_results}
+```
+
+This will be a single 1-line addition per prompt — the rest of the agent stays the same. The TODO is documented inline at the top of `question_generator.py`.
+
+#### AI / LangGraph concept
+
+This step demonstrates **multi-prompt agents** — one node, multiple LLM calls with different prompts and curated RAG contexts. Useful when:
+
+- Different output schemas are needed (technical Q vs HR Q vs project Q)
+- Different parts of the same task need different temperature settings
+- Different RAG queries make sense for each sub-task
+
+This pattern recurs in Agent 4 (Salary): one call for India market salary, one call for company-specific salary intel.
+
+#### Interview Questions
+
+1. **"Why does target_company drive question selection over the resume?"**
+   The candidate needs to be prepped for what they'll FACE in the interview, not just what they've written down. Netflix asks System Design even from candidates who never mentioned it. Resume-grounding is the secondary signal — useful for personalisation, not the primary anchor.
+
+2. **"How is `covered_in_resume` useful?"**
+   It tells the candidate which questions are within their comfort zone vs which need extra study. A Netflix candidate sees 8 of their 15 technical questions are flagged `covered_in_resume: false` → they know System Design is the gap to close before interview day.
+
+3. **"Why three sub-agents in one node instead of three nodes?"**
+   They all write to the same `questions` list field. Three separate LangGraph nodes would either overwrite each other (default merge behaviour) or require a list reducer (`Annotated[list, operator.add]`). Combining inside one node sidesteps that complexity. Trade-off: lose parallelism, but each call is fast enough that sequential is fine.
+
+4. **"How would web search improve this in Phase 3?"**
+   Llama 3.1's training cutoff is ~2024. For company patterns that have shifted recently (e.g., a startup IPO'd, a FAANG-tier introduced a new round), web search results would refresh the LLM's understanding. Same prompt structure, just one additional context block injected.
+
+5. **"How do you ensure the technical prompt doesn't make up skills?"**
+   For grounded (resume-based) questions: the prompt says "use the candidate's actual skills". For company-mandatory questions: we EXPLICITLY allow asking about topics NOT in the resume (system design, HLD/LLD), but flag them with `covered_in_resume: false`. The two categories are kept distinct, not blended.
+
+6. **"What is the temperature trade-off here (0.3 vs 0.4)?"**
+   Technical (0.3) — wants consistency, same skill should produce similarly-shaped questions. HR (0.4) — wants natural-language variety, same theme like "leadership" shouldn't always read like a template. Tuning per task is a real lever.
+
+---
+
 ## Progress Tracker
 
 | Step | Status | File |
@@ -978,7 +1107,7 @@ This is the **conditional edge** pattern — the core of LangGraph. The graph is
 | 2.1 State design | ✅ Done | `app/graph/state.py` |
 | 2.2 Resume Analyser Agent | ✅ Done | `app/graph/agents/resume_analyser.py` |
 | 2.3 Dynamic Router | ✅ Done | `app/graph/agents/router.py` |
-| 2.4 Question Generator | ⬜ Pending | `app/graph/agents/question_generator.py` |
+| 2.4 Question Generator | ✅ Done | `app/graph/agents/question_generator.py` |
 | 2.5 Salary Agent | ⬜ Pending | `app/graph/agents/salary_agent.py` |
 | 2.6 Report Compiler | ⬜ Pending | `app/graph/agents/report_compiler.py` |
 | 2.7 Graph Builder | ⬜ Pending | `app/graph/graph_builder.py` |
