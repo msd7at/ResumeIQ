@@ -1092,6 +1092,128 @@ This pattern recurs in Agent 4 (Salary): one call for India market salary, one c
 
 ---
 
+### Step 2.5 — Salary + Market Intel Agent
+
+**File(s) created:** `app/graph/agents/salary_agent.py`
+
+#### What this step does
+
+Two outputs in one node:
+
+| Sub-agent | Output state field | What |
+|---|---|---|
+| 4a — Salary | `salary_range` (dict) | Realistic min / max / median + factors + optional company-specific override |
+| 4b — Companies | `active_companies` (list[str]) | 8-12 firms currently hiring for this skill + location combo |
+
+#### `salary_range` schema
+
+```json
+{
+  "currency": "INR",
+  "min": 1200000,
+  "max": 2400000,
+  "median": 1800000,
+  "experience_band": "5-7 years",
+  "factors": [
+    "FastAPI/Python backend roles command 15-20% premium in Bangalore (2026)",
+    "AI/LLM-adjacent skills add 10-15% on top of base",
+    "..."
+  ],
+  "company_specific": {
+    "Netflix": {
+      "min": 4500000,
+      "max": 6500000,
+      "note": "Senior backend at Netflix India sits well above market median due to global pay parity"
+    }
+  },
+  "disclaimer": "Estimates based on 2024-2026 market data; verify with Glassdoor / levels.fyi / AmbitionBox before negotiating."
+}
+```
+
+The `company_specific` block is empty `{}` if no `target_company` was provided. When present, it lets the candidate see how their target's pay differs from market median.
+
+#### `active_companies` format
+
+Each entry is a single string: `"<Company> (<City>) — <Why they match>"`. Example:
+
+```text
+Razorpay (Bangalore) — Hiring senior Python/FastAPI backend; matches your stack
+Swiggy (Bangalore) — Active backend hiring for payments platform; Python + Kafka
+PhonePe (Bangalore) — UPI scaling team hiring senior Java/Kotlin engineers
+```
+
+The "why they match" must reference SPECIFIC skills, not generic phrasing.
+
+#### The KNOWN LIMITATION — and why it's the strongest case for Phase 3
+
+This agent currently uses **Llama 3.1's training-time knowledge** (cutoff ~2024). Two problems:
+
+1. **Salary numbers go stale fast.** A 2024 number is already 1-2 years stale — Indian tech salaries shifted 8-15% in that window. Stale data here misleads users in negotiations.
+2. **"Currently hiring" is meaningless without live data.** A company that's hiring today may have frozen hiring tomorrow. Without a live signal, the list is at best "companies that historically hire for this profile".
+
+**Phase 3 mitigation** — replace LLM-only generation with live DuckDuckGo lookups:
+
+```text
+embed_query → DuckDuckGo
+   "Python FastAPI backend salary Bangalore 2026"
+   "{target_company} backend engineer salary site:levels.fyi"
+   "Razorpay careers backend Python 2026"
+→ inject results into the salary + companies prompts
+```
+
+The TODO is commented at the top of `salary_agent.py`. Out of all Phase 3 integrations, this is the highest-priority one.
+
+#### Why temperature 0.3 (salary) vs 0.4 (companies)?
+
+| Output | Temp | Reason |
+|---|---|---|
+| Salary numbers | 0.3 | Want consistency — same profile should produce similar numbers across runs |
+| Company list | 0.4 | Want variety — same skills shouldn't always produce identical 10-company list |
+
+Salary is a precision task, company list is a recall task. Different temperatures match the goal.
+
+#### Why two LLM calls instead of one?
+
+A single combined prompt would dilute focus. Salary estimation needs the LLM to think about market rates, skill premiums, company tier, location effect. Company recall needs the LLM to think about who's hiring + skill match. Different mental models → cleaner outputs from separate calls.
+
+This is the same pattern as Agent 3 (Question Generator): one node, multiple LLM calls.
+
+#### AI / LangGraph concept
+
+**Multi-output agents** — when an agent produces two distinct artifacts, give each its own LLM call with its own prompt. State updates can include multiple fields:
+
+```python
+return {
+    "salary_range":     {...},
+    "active_companies": [...],
+    "current_step":     "salary_analysed",
+}
+```
+
+LangGraph merges the dict — both fields update in one node transition.
+
+#### Interview Questions
+
+1. **"Why isn't the salary agent using web search?"**
+   It will — in Phase 3. Phase 2 deliberately builds the LangGraph mechanics first, then Phase 3 layers in DuckDuckGo as a shared tool used by both this agent and the Question Generator. The TODO is documented at the top of `salary_agent.py`.
+
+2. **"How accurate is LLM-generated salary data?"**
+   For broad strokes (band, currency, factors that drive comp): reasonably accurate based on 2024 training data. For exact numbers in 2026: stale and shouldn't drive negotiation decisions. The `disclaimer` field in the output makes this explicit to the user.
+
+3. **"Why include `company_specific` only when target_company is set?"**
+   A null/empty target means the user is exploring the broader market. Inventing a specific company override would either be arbitrary or misleading. Conditional schema fields are a clean way to handle optional state inputs.
+
+4. **"Why is the active_companies list a `list[str]` instead of `list[dict]`?"**
+   Initial state schema chose `list[str]` for simplicity. Each string carries the structure inline ("Company (City) — Why"). For a richer UI in Phase 5, we may upgrade to `list[dict]`. Trade-off: simpler to render now vs flexibility later.
+
+5. **"How would you defend the salary range to a sceptical user?"**
+   Show the `factors` array — each factor is a specific market signal (skill premium, location effect, India vs global parity). Factors are auditable; raw numbers aren't. Plus the `disclaimer` directs the user to triangulate with Glassdoor / levels.fyi / AmbitionBox.
+
+6. **"What if the target_company has no global pay parity? (e.g., service company)"**
+   The LLM should still produce a `company_specific` block but with realistic service-tier numbers (e.g., 8L-15L for senior Java engineer at a service co). The prompt rule says "include {target_company} with realistic min/max" — the realism comes from the LLM understanding company tier from name alone.
+
+---
+
 ## Progress Tracker
 
 | Step | Status | File |
@@ -1108,7 +1230,7 @@ This pattern recurs in Agent 4 (Salary): one call for India market salary, one c
 | 2.2 Resume Analyser Agent | ✅ Done | `app/graph/agents/resume_analyser.py` |
 | 2.3 Dynamic Router | ✅ Done | `app/graph/agents/router.py` |
 | 2.4 Question Generator | ✅ Done | `app/graph/agents/question_generator.py` |
-| 2.5 Salary Agent | ⬜ Pending | `app/graph/agents/salary_agent.py` |
+| 2.5 Salary Agent | ✅ Done | `app/graph/agents/salary_agent.py` |
 | 2.6 Report Compiler | ⬜ Pending | `app/graph/agents/report_compiler.py` |
 | 2.7 Graph Builder | ⬜ Pending | `app/graph/graph_builder.py` |
 | 3.1 DuckDuckGo Tool | ⬜ Pending | `app/tools/web_search.py` |
