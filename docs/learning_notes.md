@@ -1214,6 +1214,129 @@ LangGraph merges the dict — both fields update in one node transition.
 
 ---
 
+### Step 2.6 — Report Compiler Agent
+
+**File(s) created:** `app/graph/agents/report_compiler.py`
+
+#### What this step does
+
+Combines all prior agents' outputs into a single polished **markdown report** stored in `state["final_report"]`. This is the artifact the frontend renders for the user.
+
+The report has 6 sections:
+
+```text
+1. Executive Summary             (LLM-generated prose)
+2. Resume Analysis               (skills + issues from Agent 1)
+3. Interview Preparation         (25 questions from Agent 3, grouped by type)
+4. Salary Insights               (range + factors + company-specific from Agent 4a)
+5. Active Hiring Companies       (list from Agent 4b)
+6. Action Plan                   (LLM-generated 5 prioritised steps)
+```
+
+#### Key design choice — TEMPLATE-BASED with only 2 LLM calls
+
+The naïve approach is to feed everything into one big LLM prompt and ask it to "write a report". That's wasteful and unreliable:
+
+- We already have **structured data** from earlier agents — re-formatting via LLM risks hallucinating numbers
+- LLM-generated tables can drift from their source data
+- A single big prompt is slow (one big call vs many small focused ones)
+
+Instead, this agent uses LLM only for the parts that genuinely need prose:
+
+| Part | Method | Why |
+|---|---|---|
+| Executive Summary | LLM (4-6 sentences) | Sets tone — needs narrative cohesion |
+| Action Plan | LLM (5 prioritised items, JSON) | Needs prioritisation + company-specific context |
+| Skills, issues, questions, salary, companies | Template formatting | Data already structured — LLM would only risk distortion |
+
+This pattern is called **structured + free-form hybrid generation**. Use templates for known structure, LLM for genuine creative work.
+
+#### The two LLM calls
+
+```python
+1) Summary  → temperature 0.4, free-form prose
+2) Actions  → temperature 0.3, format="json"
+```
+
+Different temperature per task — the summary benefits from natural variation, the action plan needs precision.
+
+#### Indian-style number formatting
+
+Salary numbers are formatted with the Indian lakh/crore grouping: `1500000 → 15,00,000` (not Western `1,500,000`). This matters because the audience is primarily Indian candidates — `15,00,000` reads as "fifteen lakh" which is how Indians actually discuss salary.
+
+```python
+def _format_inr(amount):
+    # 1500000 → "15,00,000"
+    # 12500   → "12,500"
+```
+
+#### Defensive formatting throughout
+
+Every helper guards against missing data:
+
+```python
+if not salary_range or salary_range.get("min") is None:
+    return ["_Salary range could not be estimated._"]
+
+if not questions:
+    parts.append("_None generated._")
+```
+
+If any earlier agent failed silently, the report still assembles — just with placeholder text in the missing section. The pipeline doesn't crash because of one bad LLM response upstream.
+
+#### Question rendering — rich context per question
+
+Each question shows:
+
+- Difficulty badge `[EASY/MEDIUM/HARD]`
+- Category
+- Expected topics
+- Code snippet (only if present)
+- Source resume line (for project questions, via `based_on`)
+- Why this matches the company style (`company_style_match`)
+- Market context (`market_relevance`)
+- Warning if `covered_in_resume: false` — "study extra hard"
+
+This gives the candidate a complete prep package per question, not just the question text.
+
+#### AI / LangGraph concept
+
+**Final reducer node** — the last node in a multi-agent pipeline that consolidates everything into a single deliverable. In LangGraph terms, this is the agent that converts shared state into output the user actually consumes.
+
+```text
+ResumeState (rich, structured)
+    ↓
+report_compiler_node()
+    ↓
+final_report (single markdown string)
+    ↓
+user / frontend
+```
+
+After this node, the pipeline ends — `current_step = "report_compiled"`. The graph builder (Step 2.7) wires this as the terminal node before `END`.
+
+#### Interview Questions
+
+1. **"Why mix templates and LLM instead of using LLM for the whole report?"**
+   We already have structured data from earlier agents (skill list, salary numbers, question objects). Asking the LLM to re-format them risks hallucination — it might "tidy up" a salary number or paraphrase a question. Templates preserve the source data exactly. LLM is reserved for the parts that need prose: tone-setting summary and prioritised action plan.
+
+2. **"Why use Indian-style number formatting (15,00,000)?"**
+   Audience matters. The user types "Bangalore" and expects to see Indian-style salary. Showing `1,500,000` reads as "one million five hundred thousand" — Western framing — and slows comprehension. Numbers in the audience's native format reduce cognitive friction.
+
+3. **"How does the report stay assembled if Agent 3 fails?"**
+   Every section has a fallback like `"_None generated._"`. The template iterates over an empty list and produces a placeholder, not an exception. The report's structure is preserved even if one upstream node returned bad data — degraded output beats a broken report.
+
+4. **"Why two separate LLM calls instead of one combined?"**
+   The summary needs free-form prose (`format=text`, temperature 0.4). The action plan needs strict JSON (`format=json`, temperature 0.3). Combining would force one shared format/temperature and dilute the focus of each. Two small calls cost about the same time as one big one with local LLMs.
+
+5. **"What does `covered_in_resume = false` mean in the report?"**
+   It's a flag attached to technical questions where the topic was added because of the target company's interview pattern (e.g., System Design for Netflix) but is NOT something the candidate's resume mentions. The report renders a "study extra hard" note next to those questions so the candidate prioritises them.
+
+6. **"Why is `final_report` a markdown string instead of structured data?"**
+   The frontend renders markdown directly. Storing a string keeps the frontend dumb (it doesn't need to know all the field shapes). Trade-off: harder to introspect later. For this project's scope (single report → single render), markdown wins.
+
+---
+
 ## Progress Tracker
 
 | Step | Status | File |
@@ -1231,7 +1354,7 @@ LangGraph merges the dict — both fields update in one node transition.
 | 2.3 Dynamic Router | ✅ Done | `app/graph/agents/router.py` |
 | 2.4 Question Generator | ✅ Done | `app/graph/agents/question_generator.py` |
 | 2.5 Salary Agent | ✅ Done | `app/graph/agents/salary_agent.py` |
-| 2.6 Report Compiler | ⬜ Pending | `app/graph/agents/report_compiler.py` |
+| 2.6 Report Compiler | ✅ Done | `app/graph/agents/report_compiler.py` |
 | 2.7 Graph Builder | ⬜ Pending | `app/graph/graph_builder.py` |
 | 3.1 DuckDuckGo Tool | ⬜ Pending | `app/tools/web_search.py` |
 | 3.2 Company Q Integration | ⬜ Pending | — |
