@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from app.graph.state import ResumeState
 from app.rag.embedder import embed_query
 from app.rag.vector_store import retrieve_chunks
+from app.tools.web_search import web_search, format_search_results
 
 load_dotenv()
 
@@ -25,11 +26,13 @@ _HR_COUNT        = 5
 #  questions MUST appear EVEN IF the candidate's resume does not list
 #  that skill. The candidate has to face them on interview day either way.
 #
-#  TODO (Phase 3 — web search integration):
-#    Add DuckDuckGo lookups for recent {target_company} interview reports
-#    and inject them into the prompts as additional grounding. Currently
-#    relies on the LLM's training-time knowledge, which is solid for
-#    well-known companies but stale for niche / recent shifts.
+#  PHASE 3 — Web search integration (DONE in Step 3.2):
+#    Live DuckDuckGo lookups for recent {target_company} interview reports
+#    are now injected into all 3 prompts as `{web_context}`. This refreshes
+#    the LLM's stale training-time knowledge with current signals.
+#    The tool is fail-soft — if web search returns [], prompts gracefully
+#    show "(no web search results available)" and the agent falls back to
+#    pure training-knowledge mode.
 # ──────────────────────────────────────────────────────────────────
 
 
@@ -65,6 +68,14 @@ Reference cheatsheet (apply only what fits {target_company}):
                      → Ownership, breadth, real production debugging
   • If {target_company} is "unspecified"
                      → balanced FAANG-adjacent style
+
+═══════════════════════════════════════════════════════════════════
+LIVE WEB CONTEXT — recent reports on {target_company}'s interview style
+═══════════════════════════════════════════════════════════════════
+{web_context}
+
+If the web context above shows a TOPIC SHIFT or NEW PATTERN, weight it
+heavily and OVERRIDE the cheatsheet above. Recent signal beats stale knowledge.
 
 ═══════════════════════════════════════════════════════════════════
 SECONDARY SIGNAL — Candidate's actual skills
@@ -129,6 +140,12 @@ PRIMARY SIGNAL — Target company: {target_company}
     * Service cos    → end-to-end walkthrough, client handling, delivery
   If {target_company} is "unspecified", default to balanced senior-engineer probes.
 
+Recent web reports on {target_company}'s interview style:
+{web_context}
+
+If web reports above show how this company probes projects (e.g. specific
+question formats, depth expectations), weight that over the cheatsheet.
+
 Candidate's location: {location}
 
 Resume context (projects + experience):
@@ -174,6 +191,12 @@ PRIMARY SIGNAL — Target company: {target_company}
     * Indian product → ownership at scale, on-call/incident stories, learning velocity
     * Service cos    → client communication, delivery pressure, team collaboration
   If {target_company} is "unspecified", default to balanced senior-engineer behavioral set.
+
+Recent web reports on {target_company}'s behavioral / culture interview:
+{web_context}
+
+If the web reports surface specific themes (e.g. "Amazon LP focus shift in 2026",
+"new culture round at Netflix"), reflect them in the question set.
 
 Candidate's experience level : {experience_level}
 Candidate's location         : {location}
@@ -273,6 +296,17 @@ def question_generator_node(state: ResumeState) -> dict:
 
     experience_level = _detect_experience_level(hr_context)
 
+    # ── Live web context (one search, reused across all 3 sub-agents) ──
+    # Skip the search when target is unspecified — generic results add noise.
+    if target_company != "unspecified":
+        interview_results = web_search(
+            f"{target_company} software engineer interview process questions 2026",
+            max_results=6,
+        )
+        web_context = format_search_results(interview_results)
+    else:
+        web_context = "(no target company set — skipping web lookup)"
+
     client = Client(host=_OLLAMA_BASE_URL)
 
     tech_resp = client.chat(
@@ -282,6 +316,7 @@ def question_generator_node(state: ResumeState) -> dict:
             target_company=target_company,
             skills=", ".join(skills) if skills else "general programming",
             location=location,
+            web_context=web_context,
             context=tech_context,
         )}],
         format="json",
@@ -294,6 +329,7 @@ def question_generator_node(state: ResumeState) -> dict:
             count=_PROJECT_COUNT,
             target_company=target_company,
             location=location,
+            web_context=web_context,
             context=project_context,
         )}],
         format="json",
@@ -307,6 +343,7 @@ def question_generator_node(state: ResumeState) -> dict:
             target_company=target_company,
             experience_level=experience_level,
             location=location,
+            web_context=web_context,
             context=hr_context,
         )}],
         format="json",

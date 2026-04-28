@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from app.graph.state import ResumeState
 from app.rag.embedder import embed_query
 from app.rag.vector_store import retrieve_chunks
+from app.tools.web_search import web_search, format_search_results
 
 load_dotenv()
 
@@ -14,12 +15,15 @@ _LLM_MODEL       = os.getenv("OLLAMA_LLM_MODEL", "llama3.1:8b")
 
 
 # ──────────────────────────────────────────────────────────────────
-#  TODO (Phase 3 — web search integration):
-#    Replace LLM-knowledge-based salary numbers with LIVE results from
-#    DuckDuckGo searches against Glassdoor / levels.fyi / AmbitionBox /
-#    LinkedIn jobs. Salary number staleness is the single biggest
-#    accuracy gap in this project — even more critical than refreshing
-#    interview question patterns. Address it FIRST in Phase 3.
+#  PHASE 3 — Web search integration (DONE in Step 3.3):
+#    Live DuckDuckGo lookups now ground BOTH sub-agents:
+#      4a (salary)    → site-targeted searches against levels.fyi /
+#                       glassdoor.com / ambitionbox.com for current numbers
+#      4b (companies) → live hiring activity for the candidate's
+#                       skill + location combination
+#    The tool is fail-soft — if web returns [], prompts gracefully show
+#    "(no web search results available)" and the agent falls back to
+#    pure training-knowledge mode.
 # ──────────────────────────────────────────────────────────────────
 
 
@@ -31,6 +35,13 @@ Candidate profile:
   Experience level  : {experience_level}
   Location          : {location}
   Target company    : {target_company}
+
+LIVE web salary data (levels.fyi / Glassdoor / AmbitionBox):
+{web_context}
+
+If the live data above shows specific numbers for this skill+location+company combo,
+USE those numbers as the anchor for your range. Override training-time estimates
+when live data is available — currency staleness is the biggest accuracy risk here.
 
 Output ONLY this JSON object (no markdown, no commentary):
 {{
@@ -75,6 +86,13 @@ Candidate profile:
   Skills            : {skills}
   Experience level  : {experience_level}
   Location          : {location}
+
+LIVE hiring activity from the web (LinkedIn jobs / Naukri / careers pages):
+{web_context}
+
+If the live data above mentions companies actively hiring for this skill+location,
+PRIORITISE those companies in your list — they are confirmed hiring NOW.
+Only fall back to training-knowledge defaults when web data is empty.
 
 Output ONLY this JSON object (no markdown, no commentary):
 {{
@@ -152,6 +170,22 @@ def salary_node(state: ResumeState) -> dict:
     ])
     experience_level = _detect_experience_level(hr_context)
     skills_str       = ", ".join(skills) if skills else "general programming"
+    top_skill        = skills[0] if skills else "backend developer"
+
+    # ── Live web grounding (per sub-agent — different queries) ────
+    # Salary search: site-target levels.fyi / Glassdoor / AmbitionBox
+    salary_query = (
+        f"{target_company} {top_skill} salary {location} 2026 "
+        f"site:levels.fyi OR site:glassdoor.com OR site:ambitionbox.com"
+        if target_company != "unspecified"
+        else f"{top_skill} salary {location} 2026 "
+             f"site:levels.fyi OR site:glassdoor.com OR site:ambitionbox.com"
+    )
+    salary_web = format_search_results(web_search(salary_query, max_results=5))
+
+    # Hiring search: LinkedIn / Naukri / careers pages
+    hiring_query = f"{top_skill} jobs hiring {location} 2026 {skills_str.split(',')[0] if skills else ''}"
+    hiring_web   = format_search_results(web_search(hiring_query, max_results=6))
 
     client = Client(host=_OLLAMA_BASE_URL)
 
@@ -163,6 +197,7 @@ def salary_node(state: ResumeState) -> dict:
             experience_level=experience_level,
             location=location,
             target_company=target_company,
+            web_context=salary_web,
         )}],
         format="json",
         options={"temperature": 0.3},
@@ -175,6 +210,7 @@ def salary_node(state: ResumeState) -> dict:
             skills=skills_str,
             experience_level=experience_level,
             location=location,
+            web_context=hiring_web,
         )}],
         format="json",
         options={"temperature": 0.4},
