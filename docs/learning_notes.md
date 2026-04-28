@@ -1895,6 +1895,197 @@ CONSULTANT at McKinsey:
 
 ---
 
+### Step 3.4 — End-to-End Test
+
+**File(s) created:** `tests/__init__.py`, `tests/test_e2e.py`
+
+#### What this step does
+
+Provides a runnable smoke test that executes the full LangGraph pipeline (all 6 nodes + web search) against TWO sample resumes — one tech, one non-tech — to verify the role-agnostic refactor actually works end-to-end.
+
+```bash
+# Run both samples
+python -m tests.test_e2e
+
+# Run only one
+python -m tests.test_e2e --tech
+python -m tests.test_e2e --marketing
+```
+
+#### Why two sample resumes (not one)?
+
+The role-agnostic refactor is the biggest correctness risk in the project. A single tech-only test would falsely "pass" while non-tech remained broken. Two samples cover the polar cases:
+
+| Sample | Role | Target | What it stresses |
+|---|---|---|---|
+| TECH | Senior Backend (Java/Python) | Netflix in Bangalore | Coding snippets ON, System Design, levels.fyi salary |
+| MARKETING | Senior Mktg Mgr (FMCG/SaaS) | HUL in Mumbai | Coding snippets OFF, scenario questions, Glassdoor salary |
+
+If both pass, the parameterised prompts work for the two extreme ends of the role spectrum.
+
+#### What the test verifies (smoke checks)
+
+```text
+[PASS]  validation_passed
+[PASS]  chunks_count > 0
+[PASS]  role_type set
+[PASS]  skills_found > 0
+[PASS]  resume_issues > 0
+[PASS]  questions = 25
+[PASS]  salary_range set
+[PASS]  active_companies > 0
+[PASS]  final_report set
+```
+
+These checks confirm each of the 6 LangGraph nodes ran AND produced non-empty output. They do NOT validate quality — that's a manual review of the printed report.
+
+#### Why a smoke test, not unit tests?
+
+For an integration-heavy AI pipeline, unit tests would mock the LLM calls — and mocking llama3.1's behaviour is impossible in any meaningful way. A real end-to-end run against a real Ollama instance is the only way to catch:
+
+- Prompt format bugs (missing `{role_type}` placeholder)
+- State plumbing errors (Agent 1 sets `role_type` but Agent 3 doesn't read it)
+- Web search wiring (DuckDuckGo query string syntax)
+- JSON parse failures (LLM outputs malformed schema)
+
+The smoke test costs ~60-90 seconds per resume but catches real production bugs no unit test can.
+
+#### Pre-requisites called out at the top of the file
+
+```text
+1. Ollama running locally:        ollama serve
+2. Models pulled:                 ollama pull llama3.1:8b
+                                   ollama pull nomic-embed-text
+3. Dependencies installed:        pip install -r requirements.txt
+4. SQLite + ChromaDB initialised: python -m app.db.sqlite_client
+```
+
+These are listed in the docstring so any future contributor can run the test without setup confusion.
+
+---
+
+### Step 4.1 — FastAPI main.py Setup
+
+**File(s) created:** `app/main.py`, `app/api/routes.py` (skeleton with API root only)
+
+#### What this step does
+
+Bootstraps the FastAPI application — sets up the app instance, lifespan handlers, CORS, the API router, and frontend serving. The actual analysis endpoints are added incrementally in Steps 4.2–4.6.
+
+#### The 4 startup responsibilities
+
+| Responsibility | Why at startup |
+|---|---|
+| `init_db()` | Creates the 3 SQLite tables on first run; idempotent on re-runs |
+| `get_graph()` | Pre-compiles the LangGraph singleton — eliminates cold-start latency on the first /analyse call |
+| Mount API routes | Required for FastAPI to discover endpoints |
+| Mount frontend | Serves index.html at `/` and static assets at `/static/*` |
+
+#### Why `lifespan` instead of `@app.on_event("startup")`?
+
+The decorators are deprecated as of FastAPI 0.93+. The new pattern is a single `lifespan` async context manager:
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # startup logic
+    yield
+    # shutdown logic
+
+app = FastAPI(lifespan=lifespan)
+```
+
+Cleaner — startup and shutdown live next to each other, easy to share variables between phases.
+
+#### Why pre-compile the graph at startup?
+
+`graph.compile()` walks the topology, validates edges, and builds runtime structures. This takes ~100-300ms. Doing it inside the first `/analyse` request adds noticeable latency to the first user. Doing it at startup hides that cost — it happens before the server starts accepting requests.
+
+```python
+print("[startup] Pre-compiling LangGraph ...")
+get_graph()  # primes the lazy singleton
+```
+
+The `get_graph()` function (from Step 2.7) is idempotent — calling it again later returns the cached compiled graph.
+
+#### Why mount the frontend conditionally?
+
+```python
+if _FRONTEND_DIR.exists():
+    @app.get("/")
+    def serve_index():
+        return FileResponse(_FRONTEND_DIR / "index.html")
+    app.mount("/static", StaticFiles(directory=_FRONTEND_DIR), name="static")
+```
+
+The app stays usable as a pure backend if the `frontend/` folder is removed. This matters for:
+
+- Headless deployments (API-only mode for integration partners)
+- CI environments where frontend assets aren't built
+- Future split where frontend lives on a separate CDN
+
+#### Why CORS wide open for now?
+
+```python
+allow_origins=["*"]
+allow_methods=["*"]
+```
+
+For local dev (frontend served from a dev server like Vite or a different port) this avoids CORS friction. **Before deploying** — restrict `allow_origins` to the actual frontend URL. The current setting is documented as "wide open for local dev" so it doesn't get shipped silently.
+
+#### `routes.py` skeleton
+
+The `routes.py` file currently exposes only `GET /api/` — a self-documenting endpoint that lists the planned API surface. This serves two purposes:
+
+1. Lets `main.py` import successfully right now (no `ImportError` from an empty module)
+2. Gives users / engineers a discoverable endpoint to confirm the API is alive
+
+Real endpoints get added in Steps 4.2 (`/upload`), 4.3 (`/analyse`), 4.4 (`/chat`), 4.5 (`/status`), 4.6 (streaming).
+
+#### Run command
+
+```bash
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Then visit:
+
+- `http://localhost:8000/`         → frontend (or 404 if frontend folder missing)
+- `http://localhost:8000/api/`     → API surface listing
+- `http://localhost:8000/health`   → health check
+- `http://localhost:8000/docs`     → auto-generated Swagger UI
+
+#### AI / LangGraph concept (cross-cutting)
+
+`app/main.py` is the **glue layer** — it's where the AI pipeline (LangGraph), the data layer (SQLite + ChromaDB), and the user-facing layer (HTTP API + static frontend) come together. In a typical AI Backend Engineer interview, this is the file that demonstrates you understand:
+
+- Application lifecycle (lifespan)
+- Lazy singletons (compiled graph)
+- Cold-start optimisation (pre-compile at startup)
+- Layered architecture (routes / graph / data clearly separated)
+
+#### Interview Questions
+
+1. **"Why does the test cover both tech and non-tech resumes?"**
+   The role-agnostic refactor parameterises every prompt by `role_type`. A single sample would only stress one branch of that parameter. Two samples — one tech, one non-tech — verify that the conditional logic (e.g., coding snippets ON for tech, OFF for marketing) works at both poles. If both pass, the middle is highly likely to work too.
+
+2. **"What's a smoke test versus a unit test?"**
+   Unit tests verify isolated functions with mocks. Smoke tests run the real system end-to-end and check it doesn't crash or produce empty output. For LLM-driven systems, mocking is meaningless (you can't mock llama3.1's reasoning), so smoke tests catch the bugs that matter — prompt template mismatches, state plumbing errors, JSON parse failures.
+
+3. **"Why use `lifespan` instead of `@app.on_event` decorators?"**
+   `@app.on_event("startup")` and `@app.on_event("shutdown")` are deprecated since FastAPI 0.93. The replacement is a single async context manager passed as `lifespan=`. Cleaner — startup and shutdown logic live in one function, can share local variables, and the syntax matches the standard Python `with` pattern.
+
+4. **"Why pre-compile the LangGraph at startup?"**
+   `graph.compile()` takes ~100-300ms and is called in the first `/analyse` request if not done at startup. Pre-compiling shifts that cost off the user's request path into the server boot. The first user gets the same response time as the hundredth.
+
+5. **"Why is CORS wide open in main.py?"**
+   For local dev — the frontend may run on a different port (Vite at 5173, the backend at 8000). `allow_origins=["*"]` avoids CORS errors during development. The comment in the code explicitly flags this as a "tighten before deploy" item — restrict to the production frontend URL when shipping.
+
+6. **"How would you scale `app/main.py` from a hobby app to production?"**
+   (a) Replace SQLite with Postgres. (b) Move ChromaDB to a managed vector DB or HttpClient pointed at a server. (c) Add request logging via middleware. (d) Add `/metrics` endpoint for Prometheus. (e) Move CORS origins to env vars. (f) Add startup health checks for Ollama (fail fast if it's not reachable). (g) Run uvicorn behind gunicorn with multiple workers. The application code itself stays mostly the same.
+
+---
+
 ## Progress Tracker
 
 | Step | Status | File |
@@ -1917,8 +2108,8 @@ CONSULTANT at McKinsey:
 | 3.1 DuckDuckGo Tool | ✅ Done | `app/tools/web_search.py` |
 | 3.2 Company Q Integration | ✅ Done | `app/graph/agents/question_generator.py` |
 | 3.3 Salary Integration | ✅ Done | `app/graph/agents/salary_agent.py` |
-| 3.4 End-to-end test | ⬜ Pending | — |
-| 4.1 main.py | ⬜ Pending | `app/main.py` |
+| 3.4 End-to-end test | ✅ Done | `tests/test_e2e.py` |
+| 4.1 main.py | ✅ Done | `app/main.py` (+ `app/api/routes.py` skeleton) |
 | 4.2 /upload endpoint | ⬜ Pending | `app/api/routes.py` |
 | 4.3 /analyse endpoint | ⬜ Pending | `app/api/routes.py` |
 | 4.4 /chat endpoint | ⬜ Pending | `app/api/routes.py` |

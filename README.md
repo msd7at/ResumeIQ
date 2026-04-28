@@ -141,11 +141,11 @@ resume-ai-agent/
 - [x] Step 3.1 — DuckDuckGo tool setup
 - [x] Step 3.2 — Integrate in Question Generator (use recent {target_company} interview reports to refresh LLM context)
 - [x] Step 3.3 — Integrate in Salary Agent (live salary + active hiring lookups)
-- [ ] Step 3.4 — End to end test
+- [x] Step 3.4 — End to end test
 
 ### Phase 4 — FastAPI Backend
 
-- [ ] Step 4.1 — main.py setup
+- [x] Step 4.1 — main.py setup
 - [ ] Step 4.2 — /upload endpoint
 - [ ] Step 4.3 — /analyse endpoint
 - [ ] Step 4.4 — /chat endpoint
