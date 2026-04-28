@@ -1763,6 +1763,138 @@ Trade-offs of adding web RAG:
 
 ---
 
+### Refactor R1 — Role-Agnostic Redesign
+
+**Files modified:** `state.py`, `resume_analyser.py`, `question_generator.py`, `salary_agent.py`, `report_compiler.py`
+
+#### Why this refactor
+
+Earlier prompts were heavily software-developer biased — examples mentioned Python / FastAPI / Netflix / System Design throughout. This locked the product to one user segment. The user wanted ResumeIQ to work for ANY profession: marketing, finance, design, sales, healthcare, consulting, HR, education, engineering (non-software), legal, etc.
+
+#### The design choice — auto-detect role + parameterise prompts
+
+There were 3 viable approaches:
+
+1. **Per-role prompt branches** — separate prompts for tech / marketing / finance / etc.
+   - Pro: maximum precision per role.
+   - Con: many prompts to maintain; long if/else dispatch in every agent.
+2. **Generic prompts with no role awareness**
+   - Pro: simplest.
+   - Con: LLM has no signal — questions feel vague and don't match the role.
+3. **Single prompt template + `{role_type}` parameter** ✓ chosen
+   - Pro: one path, easy to maintain. LLM uses `role_type` to tailor itself.
+   - Con: relies on the LLM's general knowledge of each profession (acceptable for Llama 3.1).
+
+#### The 5 changes
+
+| File | Change |
+|---|---|
+| `state.py` | Added two new state fields: `role_type` and `role_description` (initialised to empty strings) |
+| `resume_analyser.py` | LLM now also detects `role_type` and `role_description` alongside skills + issues. Single LLM call, output schema extended. |
+| `question_generator.py` | All 3 prompts now take `{role_type}` + `{role_description}`. Cheatsheet covers companies × role-type combinations (Netflix × SWE, McKinsey × consulting, P&G × marketing, etc). Coding snippets are now CONDITIONAL — only included for technical roles; non-tech roles get scenario-based questions instead. Question `type` field changed from `"technical"` → `"skill"`. |
+| `salary_agent.py` | Both prompts take `role_type`. Salary cheatsheet covers role-specific factors (sales has variable pay, IB has 50-100% bonus, FMCG vs SaaS marketing pay diff, etc). Companies cheatsheet adapts the company mix to the profession (FMCG/D2C/agencies for marketing, Big-4/banks/PE for finance, hospitals for healthcare). |
+| `report_compiler.py` | Header now shows role + role description. Question section header is generic ("Skill-Based Questions" not "Technical"). Backward compat: `_format_question_group` accepts both `"skill"` and legacy `"technical"` types. Both LLM prompts (summary + action plan) now receive `role_type`. |
+
+#### Coding question conditional logic
+
+The single trickiest bit. Software / data / ML candidates SHOULD get coding snippets. Marketing / sales / HR candidates should NOT — they get scenario-based questions.
+
+The rule moved INTO the prompt rather than into Python code:
+
+```text
+CODING SNIPPETS — ONLY include `code_snippet` (10-25 lines) when {role_type} is a
+technical role (software engineering, data science, ML, data analytics, quantitative
+finance). Include 3-5 such questions for technical roles. For non-technical roles
+(marketing, sales, HR, design, finance non-quant, healthcare, legal, etc.) set
+`code_snippet: null` and use SCENARIO-based questions instead — short situations
+the candidate must reason through and respond to.
+```
+
+The LLM applies this rule at generation time. No Python branching needed.
+
+#### Web search queries are now role-aware
+
+Before:
+```python
+f"{target_company} software engineer interview process questions 2026"
+f"{target_company} backend engineer salary {location}"
+```
+
+After:
+```python
+f"{target_company} {role_type} interview process questions 2026"
+f"{target_company} {role_type} {top_skill} salary {location} 2026"
+```
+
+A marketing manager targeting HUL now searches for "HUL marketing manager interview process" instead of "HUL software engineer interview process". Same code path, different query for different roles.
+
+#### Heuristic experience-level detection — generalised
+
+The seniority heuristic was originally tech-biased ("principal", "architect", "lead"). Extended to cover non-tech seniority markers:
+
+```python
+senior   → "principal", "architect", "head of", "director", "vice president", "vp",
+           "partner", "chief", "founder", "cxo", "general manager"
+mid-sr   → "lead", "senior", "manager", "associate director"
+junior   → "intern", "fresher", "graduate", "trainee", "associate analyst"
+```
+
+Now picks up "Senior Marketing Manager", "Vice President of Operations", "Associate Director of Strategy", "Healthcare Trainee", etc.
+
+#### What did NOT change
+
+| Unchanged | Why |
+|---|---|
+| Number of questions (15 + 5 + 5 = 25) | Distribution works for any role |
+| RAG pipeline (chunking / embedding) | Already role-agnostic |
+| Router logic | No role-dependent routing needed |
+| Graph topology | Same 6 nodes, same edges |
+| Report assembly templates | Already template-based, just made wording generic |
+
+#### Sample paths after refactor
+
+```text
+SOFTWARE ENG candidate at Netflix:
+  role_type = "software engineering"
+  → questions include System Design, HLD/LLD, coding snippets
+  → salary searches levels.fyi
+  → companies list: FAANG + Indian product + startups
+
+MARKETING candidate at HUL:
+  role_type = "marketing"
+  → questions include 4Ps, ROI, attribution, brand strategy (NO coding)
+  → salary searches Glassdoor + AmbitionBox for marketing roles
+  → companies list: FMCG (HUL, ITC, Nestle) + D2C + SaaS + agencies
+
+CONSULTANT at McKinsey:
+  role_type = "consulting"
+  → questions include case interview, MECE, market sizing (NO coding)
+  → salary searches consulting tier comparisons
+  → companies list: MBB + Tier-2 + Big-4 advisory
+```
+
+#### Interview Questions
+
+1. **"Why parameterise with `role_type` instead of branching the prompts?"**
+   Branching means N prompts to maintain (one per role). One prompt × one parameter is half the maintenance burden, and the LLM is smart enough to use the parameter to tailor its output. Branching is a 2024 pattern; parameterisation is the 2026 pattern.
+
+2. **"How does the LLM know what role_type a resume is?"**
+   Agent 1 (resume_analyser) detects it as part of its single LLM call. The detection is just one field added to the JSON output schema. No second pass needed — same prompt, richer output.
+
+3. **"Could a fine-tuned per-role model do better than this?"**
+   Yes, with sufficient labelled data per role. For ResumeIQ's portfolio scope, parameterised prompts give 80% of the precision at 5% of the engineering cost. Fine-tuning would only become worth it at hundreds of resumes per role per week.
+
+4. **"What if `role_type` is empty (Agent 1 failed)?"**
+   Every consumer falls back to `"general professional"` and `"candidate from a non-specified profession"`. The prompts still work — they just can't tailor as precisely. Pipeline doesn't break.
+
+5. **"Is this an agentic system or just a parameter-driven pipeline?"**
+   It's a multi-agent pipeline where one early agent's output (role detection) becomes a parameter for downstream agents. That's the core LangGraph value — state flows between agents, and downstream agents adapt based on what upstream agents discovered. Without state-sharing, this would be 5 disconnected LLM calls.
+
+6. **"How would you scale to support a NEW profession that didn't exist before?"**
+   Three steps: (a) extend the role_type list in the analyser prompt to recognise it, (b) add a row to the cheatsheets in question_generator and salary_agent so the LLM knows what good looks like, (c) test against a sample resume from that profession. No code changes, just prompt edits.
+
+---
+
 ## Progress Tracker
 
 | Step | Status | File |

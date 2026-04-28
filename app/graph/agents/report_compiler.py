@@ -26,6 +26,8 @@ _LLM_MODEL       = os.getenv("OLLAMA_LLM_MODEL", "llama3.1:8b")
 _SUMMARY_PROMPT = """You are writing the executive summary of a resume analysis report.
 
 Candidate context:
+  Role type                             : {role_type}
+  Role description                      : {role_description}
   Skills detected ({skill_count})       : {skills_preview}
   Resume issues found ({issue_count})   : {issues_preview}
   Target company                        : {target_company}
@@ -45,6 +47,7 @@ Output ONLY the prose. No markdown headings. No bullet points. No labels."""
 _ACTION_PLAN_PROMPT = """Based on the candidate analysis below, generate a prioritised 5-point action plan.
 
 Candidate context:
+  Role type         : {role_type}
   Skills            : {skills}
   Top resume issues : {issues}
   Target            : {target_company} in {location}
@@ -190,10 +193,13 @@ def _assemble_report(
     actions: list[str],
     target_company: str,
     location: str,
+    role_type: str,
+    role_description: str,
 ) -> str:
     parts: list[str] = [
         "# Resume Analysis Report",
-        f"_Generated for target: **{target_company}** in **{location}**_",
+        f"_Role: **{role_type}** — {role_description}_" if role_description else f"_Role: **{role_type}**_",
+        f"_Target: **{target_company}** in **{location}**_",
         f"_Date: {datetime.utcnow().strftime('%Y-%m-%d')}_",
         "",
         "---",
@@ -224,15 +230,17 @@ def _assemble_report(
         "",
         "## Interview Preparation",
         "",
-        f"_25 questions = 15 technical + 5 project + 5 HR. Tailored to **{target_company}**'s style._",
+        f"_25 questions = 15 skill-based + 5 project / resume + 5 HR. "
+        f"Tailored to **{target_company}**'s style for a **{role_type}** candidate._",
         "",
     ])
 
-    technical_qs = [q for q in questions if q.get("type") == "technical"]
-    project_qs   = [q for q in questions if q.get("type") == "project"]
-    hr_qs        = [q for q in questions if q.get("type") == "hr"]
+    # Accept both new "skill" type and legacy "technical" type for backward-compat
+    skill_qs   = [q for q in questions if q.get("type") in ("skill", "technical")]
+    project_qs = [q for q in questions if q.get("type") == "project"]
+    hr_qs      = [q for q in questions if q.get("type") == "hr"]
 
-    parts.extend(_format_question_group("Technical Questions", technical_qs))
+    parts.extend(_format_question_group("Skill-Based Questions", skill_qs))
     parts.extend(_format_question_group("Resume / Project Questions", project_qs))
     parts.extend(_format_question_group("HR / Behavioral Questions", hr_qs))
 
@@ -302,8 +310,10 @@ def report_compiler_node(state: ResumeState) -> dict:
     questions        = state["questions"]
     salary_range     = state["salary_range"]
     active_companies = state["active_companies"]
-    target_company   = state["target_company"] or "any tech company"
+    target_company   = state["target_company"] or "any company"
     location         = state["user_location"] or "India"
+    role_type        = state.get("role_type") or "general professional"
+    role_description = state.get("role_description") or ""
 
     client = Client(host=_OLLAMA_BASE_URL)
 
@@ -320,6 +330,8 @@ def report_compiler_node(state: ResumeState) -> dict:
     summary_resp = client.chat(
         model=_LLM_MODEL,
         messages=[{"role": "user", "content": _SUMMARY_PROMPT.format(
+            role_type=role_type,
+            role_description=role_description,
             skill_count=len(skills),
             skills_preview=", ".join(skills[:8]) + ("..." if len(skills) > 8 else ""),
             issue_count=len(issues),
@@ -336,6 +348,7 @@ def report_compiler_node(state: ResumeState) -> dict:
     action_resp = client.chat(
         model=_LLM_MODEL,
         messages=[{"role": "user", "content": _ACTION_PLAN_PROMPT.format(
+            role_type=role_type,
             skills=", ".join(skills[:10]),
             issues="; ".join(issues[:5]) if issues else "no major issues",
             target_company=target_company,
@@ -361,6 +374,8 @@ def report_compiler_node(state: ResumeState) -> dict:
         actions=actions,
         target_company=target_company,
         location=location,
+        role_type=role_type,
+        role_description=role_description,
     )
 
     return {

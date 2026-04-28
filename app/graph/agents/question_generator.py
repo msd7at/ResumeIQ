@@ -36,38 +36,40 @@ _HR_COUNT        = 5
 # ──────────────────────────────────────────────────────────────────
 
 
-_TECHNICAL_PROMPT = """You are a senior technical interviewer at {target_company} in 2026.
+_TECHNICAL_PROMPT = """You are a senior interviewer at {target_company} in 2026,
+interviewing a candidate for a {role_type} role.
+Role context: {role_description}
+
 Your goal: prepare this candidate for the questions they will ACTUALLY face at {target_company}.
 
 ═══════════════════════════════════════════════════════════════════
-PRIMARY SIGNAL — {target_company}'s MANDATORY interview topics
+PRIMARY SIGNAL — {target_company}'s MANDATORY topics for {role_type} roles
 ═══════════════════════════════════════════════════════════════════
-Recall the topics this company is HISTORICALLY known to interview on.
-These topics MUST appear in the question set even if the candidate's resume
-does NOT list them — the candidate WILL be asked them on interview day.
+Recall what {target_company} is HISTORICALLY known to ask candidates for {role_type}.
+These topics MUST appear in the question set even if the candidate's resume does
+NOT list them — the candidate WILL be asked them on interview day.
 
-Reference cheatsheet (apply only what fits {target_company}):
-  • Netflix          → Distributed Systems, System Design (HLD + LLD),
-                       Microservices, Observability, Chaos Engineering,
-                       JVM tuning, Fault Tolerance, Senior judgement
-  • Google           → Algorithms, Data Structures, System Design at scale,
-                       Complexity analysis, Distributed systems
-  • Amazon           → Algorithms, System Design, OOP, Leadership Principles
-                       overlay on tech, Scalability, AWS internals
-  • Meta / Facebook  → Algorithms, large-scale System Design, Product engineering
-  • Microsoft        → Balanced coding + System Design + culture-fit
-  • Apple            → Low-level systems, performance, memory, craft
-  • Stripe / Airbnb  → Real-world product engineering, API design, idempotency
-  • Flipkart / Zomato / Swiggy / Razorpay
-                     → DSA, HLD, LLD, India-scale traffic, payment correctness,
-                       latency, fault tolerance
-  • Infosys / TCS / Wipro / Accenture / Capgemini
-                     → Fundamentals, project walkthroughs, basic DSA,
-                       framework basics, client communication
-  • Series-A / B startup
-                     → Ownership, breadth, real production debugging
-  • If {target_company} is "unspecified"
-                     → balanced FAANG-adjacent style
+Examples of company × role-type expectations (apply only the relevant ones):
+  • Netflix × software engineering → Distributed Systems, System Design (HLD/LLD),
+                                     Microservices, Observability, Senior judgement
+  • Google × data science          → Statistical reasoning, A/B testing rigour,
+                                     ML system design, SQL depth, causal inference
+  • McKinsey × consulting          → Case interviews, market sizing, structured
+                                     problem solving, MECE thinking
+  • P&G / Unilever × marketing     → 4Ps frameworks, brand strategy, consumer
+                                     insight cases, ROI on campaigns
+  • Goldman Sachs × finance        → DCF / LBO modelling, M&A mechanics, market
+                                     view, technical accounting
+  • IDEO × design                  → Design process walkthrough, portfolio critique,
+                                     user research methodology, accessibility
+  • Salesforce / HubSpot × sales   → Pipeline management, deal cycle stories,
+                                     enterprise B2B negotiation
+  • AIIMS / Apollo × healthcare    → Clinical scenarios, ethics, ICU/triage cases,
+                                     evidence-based practice
+  • Tier-1 service co × any role   → Fundamentals + project walkthroughs +
+                                     client / stakeholder communication
+  • Series-A startup × any role    → Ownership, breadth, real-world judgement
+  • If {target_company} is "unspecified" → balanced industry-standard set for {role_type}
 
 ═══════════════════════════════════════════════════════════════════
 LIVE WEB CONTEXT — recent reports on {target_company}'s interview style
@@ -86,13 +88,16 @@ Use these to GROUND some questions in the candidate's stated stack.
 ═══════════════════════════════════════════════════════════════════
 TERTIARY SIGNAL — Location: {location}
 ═══════════════════════════════════════════════════════════════════
-Weight applicable topics toward the local industry where it makes sense.
+Weight applicable topics toward the local industry where it makes sense
+(e.g. Bangalore tech startups, Mumbai BFSI, Delhi marketing/consumer brands,
+Hyderabad pharma, etc.).
 
 ═══════════════════════════════════════════════════════════════════
 COVERAGE TARGETS for {count} questions
 ═══════════════════════════════════════════════════════════════════
-  ~ 50% on {target_company}'s standard interview topics (resume coverage NOT required)
-  ~ 40% on the candidate's listed skills, framed in {target_company}'s style
+  ~ 50% on {target_company}'s standard interview topics for {role_type}
+        (resume coverage NOT required)
+  ~ 40% grounded in the candidate's listed skills, framed in {target_company}'s style
   ~ 10% supporting / market-relevant cross-over questions
 
 Resume context (skills + projects):
@@ -104,12 +109,12 @@ Output ONLY this JSON object (no markdown, no commentary):
 {{
   "questions": [
     {{
-      "type": "technical",
-      "category": "System Design",
-      "question": "Phrased the way {target_company} would ask it.",
+      "type": "skill",
+      "category": "<role-relevant category, e.g. System Design / Marketing Strategy / Financial Modelling>",
+      "question": "Phrased the way {target_company} would ask it for a {role_type} candidate.",
       "difficulty": "medium",
       "expected_topics": ["topic1", "topic2", "topic3"],
-      "code_snippet": "10-25 lines of code, or null for non-coding",
+      "code_snippet": "10-25 lines, ONLY for coding-relevant roles; null otherwise",
       "covered_in_resume": true,
       "company_style_match": "why this question matches {target_company}'s pattern",
       "market_relevance": "why this matters in 2026"
@@ -122,23 +127,34 @@ Rules:
 - Difficulty mix: 4 easy, 7 medium, 4 hard.
 - Set `covered_in_resume = false` when the topic is asked due to {target_company}'s
   pattern but the resume does not show it. Set true when grounded in resume.
-- Include 3-5 CODING questions with a real `code_snippet`.
+- CODING SNIPPETS — ONLY include `code_snippet` (10-25 lines) when {role_type} is a
+  technical role (software engineering, data science, ML, data analytics, quantitative
+  finance). Include 3-5 such questions for technical roles. For non-technical roles
+  (marketing, sales, HR, design, finance non-quant, healthcare, legal, etc.) set
+  `code_snippet: null` and use SCENARIO-based questions instead — short situations
+  the candidate must reason through and respond to.
 - Each question must be SPECIFIC, TESTABLE, non-generic.
 - Output ONLY the JSON object."""
 
 
-_PROJECT_PROMPT = """You are a hiring manager at {target_company} reading this candidate's resume.
-Generate exactly {count} questions tied to SPECIFIC projects and claims in the resume,
-framed the way {target_company} would probe these projects.
+_PROJECT_PROMPT = """You are a hiring manager at {target_company} reading this candidate's resume
+for a {role_type} role.
+Role context: {role_description}
 
-PRIMARY SIGNAL — Target company: {target_company}
-  Recall {target_company}'s style of probing project claims:
-    * Netflix → senior-judgement: "why this design? what trade-offs? what broke first?"
-    * Amazon  → STAR mapping to Leadership Principles
-    * Google  → deep design discussion, scale assumptions, complexity rigour
-    * Indian product → scale, latency, payment correctness, fault tolerance probes
-    * Service cos    → end-to-end walkthrough, client handling, delivery
-  If {target_company} is "unspecified", default to balanced senior-engineer probes.
+Generate exactly {count} questions tied to SPECIFIC projects, campaigns, deliverables,
+or claims in the resume, framed the way {target_company} would probe them.
+
+PRIMARY SIGNAL — Target company × role: {target_company} × {role_type}
+  Recall how {target_company} probes claims for {role_type} candidates. Examples:
+    * Tech (software / data) → "why this design? what trade-offs? what broke first?"
+                               STAR mapping for Amazon-LP-style companies
+    * Marketing              → "what was the ROI? attribution model? sample size?"
+    * Sales                  → "what was the deal cycle? quota %? churn?"
+    * Finance / Consulting   → "walk me through your model. assumptions? sensitivity?"
+    * Design                 → "show me the work. user research? iterations? metrics?"
+    * Healthcare             → "case walkthrough. clinical reasoning? outcome?"
+    * Generic                → "scope, ownership, outcome, what would you redo?"
+  If {target_company} is "unspecified", default to balanced senior-level probes for {role_type}.
 
 Recent web reports on {target_company}'s interview style:
 {web_context}
@@ -158,8 +174,8 @@ Output ONLY this JSON object (no markdown, no commentary):
   "questions": [
     {{
       "type": "project",
-      "category": "system design",
-      "question": "In your <specific project>, why <specific tech>? What trade-offs?",
+      "category": "<role-relevant category>",
+      "question": "In your <specific project / campaign / deal / case>, why <specific choice>? What trade-offs?",
       "difficulty": "medium",
       "expected_topics": ["decision rationale", "alternatives", "trade-offs"],
       "based_on": "exact resume line / project that prompted this question",
@@ -173,24 +189,30 @@ Rules:
 - Each question MUST reference a SPECIFIC detail from the resume.
 - Probe deeper than the resume states — verify the claim is real.
 - `based_on` must quote the exact resume line / phrase that prompted the question.
-- Frame each question through {target_company}'s lens.
+- Frame each question through {target_company}'s lens for a {role_type} candidate.
 - Output ONLY the JSON object."""
 
 
-_HR_PROMPT = """You are an HR interviewer at {target_company}.
+_HR_PROMPT = """You are an HR interviewer at {target_company} interviewing a {role_type} candidate.
+Role context: {role_description}
+
 Generate exactly {count} behavioral questions in {target_company}'s SPECIFIC framework.
 
 PRIMARY SIGNAL — Target company: {target_company}
   Map every question to that company's known behavioral framework:
-    * Amazon         → strict Leadership Principles (Customer Obsession, Ownership,
-                       Bias for Action, Dive Deep, Are Right A Lot, Earn Trust, etc.)
-    * Google         → "googliness" + structured general behavioral
-    * Microsoft      → growth mindset + collaborative impact
-    * Netflix        → senior-judgement, freedom & responsibility culture
-    * Apple          → attention to craft, owning quality
-    * Indian product → ownership at scale, on-call/incident stories, learning velocity
-    * Service cos    → client communication, delivery pressure, team collaboration
-  If {target_company} is "unspecified", default to balanced senior-engineer behavioral set.
+    * Amazon              → strict Leadership Principles (Customer Obsession, Ownership,
+                            Bias for Action, Dive Deep, Are Right A Lot, Earn Trust, etc.)
+    * Google              → "googliness" + structured general behavioral
+    * Microsoft           → growth mindset + collaborative impact
+    * Netflix             → senior-judgement, freedom & responsibility culture
+    * Apple               → attention to craft, owning quality
+    * Tier-1 consulting   → structured thinking, client influence, leadership at clients
+    * Big-4 / Banks       → integrity, attention to detail, regulatory mindset
+    * Healthcare orgs     → patient-centred care, ethical scenarios, team handover
+    * FMCG (HUL, P&G)     → consumer-first, ownership of P&L, scale-up stories
+    * Indian product co   → ownership at scale, on-call/incident stories, learning velocity
+    * Service cos         → client communication, delivery pressure, team collaboration
+  If {target_company} is "unspecified", default to a balanced senior-level set for {role_type}.
 
 Recent web reports on {target_company}'s behavioral / culture interview:
 {web_context}
@@ -230,12 +252,21 @@ Rules:
 
 
 def _detect_experience_level(context: str) -> str:
+    """
+    Cheap heuristic — keyword scan covering common seniority markers across
+    multiple professions (tech, marketing, finance, ops, healthcare, etc.).
+    """
     lower = context.lower()
-    if any(k in lower for k in ["principal", "architect", "manager", "head of", "director"]):
+    if any(k in lower for k in [
+        "principal", "architect", "head of", "director", "vice president", "vp,",
+        "partner", "chief", "founder", "cxo", "general manager",
+    ]):
         return "senior (7+ years, leadership exposure)"
-    if "lead" in lower or "senior" in lower:
+    if any(k in lower for k in ["lead", "senior", "manager", "associate director"]):
         return "mid-senior (4-7 years)"
-    if any(k in lower for k in ["intern", "fresher", "graduate", "trainee"]):
+    if any(k in lower for k in [
+        "intern", "fresher", "graduate", "trainee", "associate analyst", "junior",
+    ]):
         return "junior / fresher (0-1 year)"
     return "mid-level (2-4 years)"
 
@@ -274,10 +305,12 @@ def question_generator_node(state: ResumeState) -> dict:
         Agent 3b →  5 project-specific verification questions
         Agent 3c →  5 HR / behavioral questions in target_company's framework
     """
-    session_id     = state["session_id"]
-    skills         = state["skills_found"]
-    location       = state["user_location"] or "India (general)"
-    target_company = state["target_company"] or "unspecified"
+    session_id       = state["session_id"]
+    skills           = state["skills_found"]
+    location         = state["user_location"] or "India (general)"
+    target_company   = state["target_company"] or "unspecified"
+    role_type        = state.get("role_type") or "general professional"
+    role_description = state.get("role_description") or "candidate from a non-specified profession"
 
     tech_context = _build_context(session_id, [
         "skills technologies frameworks programming languages tools",
@@ -300,7 +333,7 @@ def question_generator_node(state: ResumeState) -> dict:
     # Skip the search when target is unspecified — generic results add noise.
     if target_company != "unspecified":
         interview_results = web_search(
-            f"{target_company} software engineer interview process questions 2026",
+            f"{target_company} {role_type} interview process questions 2026",
             max_results=6,
         )
         web_context = format_search_results(interview_results)
@@ -314,7 +347,9 @@ def question_generator_node(state: ResumeState) -> dict:
         messages=[{"role": "user", "content": _TECHNICAL_PROMPT.format(
             count=_TECHNICAL_COUNT,
             target_company=target_company,
-            skills=", ".join(skills) if skills else "general programming",
+            role_type=role_type,
+            role_description=role_description,
+            skills=", ".join(skills) if skills else "no skills detected",
             location=location,
             web_context=web_context,
             context=tech_context,
@@ -328,6 +363,8 @@ def question_generator_node(state: ResumeState) -> dict:
         messages=[{"role": "user", "content": _PROJECT_PROMPT.format(
             count=_PROJECT_COUNT,
             target_company=target_company,
+            role_type=role_type,
+            role_description=role_description,
             location=location,
             web_context=web_context,
             context=project_context,
@@ -341,6 +378,8 @@ def question_generator_node(state: ResumeState) -> dict:
         messages=[{"role": "user", "content": _HR_PROMPT.format(
             count=_HR_COUNT,
             target_company=target_company,
+            role_type=role_type,
+            role_description=role_description,
             experience_level=experience_level,
             location=location,
             web_context=web_context,

@@ -21,7 +21,10 @@ _RAG_QUERIES = [
 ]
 
 
-_ANALYSIS_PROMPT = """You are an expert technical resume reviewer.
+_ANALYSIS_PROMPT = """You are an expert resume reviewer working with candidates from ANY profession
+(software, marketing, data science, design, sales, finance, HR, healthcare, legal,
+education, operations, consulting, engineering, etc.).
+
 Analyse the resume content below and respond with strict JSON.
 
 Resume content (relevant sections):
@@ -31,19 +34,37 @@ Resume content (relevant sections):
 
 Respond with ONLY this JSON object (no markdown, no commentary):
 {{
+  "role_type": "software engineering",
+  "role_description": "Mid-senior backend engineer with 5+ years in Python/FastAPI and AI/LLM adjacency",
   "skills_found": ["Python", "FastAPI", "Docker", "..."],
   "resume_issues": ["No quantified achievements in 2nd job", "Missing LinkedIn URL", "..."]
 }}
 
 Rules:
-- skills_found: list ALL technical skills, tools, programming languages, frameworks,
-  databases, and cloud services explicitly mentioned in the resume.
-- resume_issues: list 3 to 7 specific, actionable weaknesses.
-  GOOD examples:
+- role_type: ONE broad profession label. Pick from this list (or use a similar concise label):
+    "software engineering", "data science", "data analytics", "product management",
+    "design (UI/UX)", "design (graphic / industrial)", "marketing", "sales",
+    "finance / accounting", "investment / banking", "consulting",
+    "human resources", "operations", "supply chain", "customer success",
+    "healthcare / medical", "legal", "education / teaching",
+    "engineering (mechanical / civil / electrical)", "creative (writing / editing)",
+    "research / academia", "general management", "other"
+- role_description: ONE concise sentence — seniority + specialism + domain.
+- skills_found: list ALL ROLE-RELEVANT skills, tools, methodologies, frameworks,
+  certifications, software, or domain competencies the candidate explicitly mentions.
+  Examples by role type:
+    * Software → Python, AWS, Kubernetes, React
+    * Marketing → SEO, Google Analytics, HubSpot, A/B testing, content strategy
+    * Finance → Excel modelling, SAP, IFRS, M&A, valuation
+    * Healthcare → ICU experience, EMR systems, ACLS certification, paediatric care
+    * Design → Figma, user research, design systems, accessibility
+    * Sales → Salesforce, pipeline management, enterprise B2B, quota attainment
+- resume_issues: 3 to 7 specific, actionable weaknesses.
+  GOOD examples (universal):
     * "Job descriptions lack quantified impact (no numbers, percentages, scale)"
-    * "Missing LinkedIn or GitHub URL in contact section"
-    * "Action verbs are weak — 'worked on' instead of 'led', 'designed', 'built'"
-    * "No tech stack mentioned for the most recent project"
+    * "Missing LinkedIn URL in contact section"
+    * "Action verbs are weak — 'worked on' instead of 'led', 'designed', 'launched'"
+    * "No outcomes mentioned for the most recent role"
   AVOID generic feedback like "improve formatting" or "add more details".
 - Output ONLY the JSON object, nothing before or after."""
 
@@ -88,15 +109,21 @@ def resume_analyser_node(state: ResumeState) -> dict:
 
     # ── Step 3: parse JSON ────────────────────────────────────────
     try:
-        parsed = json.loads(raw)
-        skills = parsed.get("skills_found", [])
-        issues = parsed.get("resume_issues", [])
+        parsed           = json.loads(raw)
+        skills           = parsed.get("skills_found", [])
+        issues           = parsed.get("resume_issues", [])
+        role_type        = parsed.get("role_type", "")
+        role_description = parsed.get("role_description", "")
     except json.JSONDecodeError:
-        skills = []
-        issues = ["Resume analysis produced malformed output — please re-run."]
+        skills           = []
+        issues           = ["Resume analysis produced malformed output — please re-run."]
+        role_type        = ""
+        role_description = ""
 
     return {
-        "skills_found":  skills,
-        "resume_issues": issues,
-        "current_step":  "resume_analysed",
+        "skills_found":     skills,
+        "resume_issues":    issues,
+        "role_type":        role_type,
+        "role_description": role_description,
+        "current_step":     "resume_analysed",
     }
