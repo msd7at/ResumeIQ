@@ -146,9 +146,9 @@ resume-ai-agent/
 ### Phase 4 — FastAPI Backend
 
 - [x] Step 4.1 — main.py setup
-- [ ] Step 4.2 — /upload endpoint
-- [ ] Step 4.3 — /analyse endpoint
-- [ ] Step 4.4 — /chat endpoint
+- [x] Step 4.2 — /upload endpoint
+- [x] Step 4.3 — /analyse endpoint
+- [x] Step 4.4 — /chat endpoint
 - [ ] Step 4.5 — /status endpoint
 - [ ] Step 4.6 — Streaming response
 

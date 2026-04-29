@@ -2086,6 +2086,399 @@ Then visit:
 
 ---
 
+### Step 4.2 — `/upload` Endpoint
+
+**File(s) updated:** `app/api/routes.py`
+
+#### What this step does
+
+Implements the first real API endpoint — `POST /api/upload`. It accepts a resume file (PDF or DOCX), parses it to plain text, persists both the original and the parsed text on disk, creates a row in the `resume_sessions` SQLite table, and returns a `session_id` the client uses for the subsequent `/analyse` call.
+
+#### Why upload and analyse are split into two endpoints
+
+A naive design would be a single `POST /api/process` that takes the file AND runs the full pipeline. We split them on purpose:
+
+- **Upload is fast (~1s)** — IO and parsing only. Returns a `session_id` immediately.
+- **Analyse is slow (~30-90s)** — runs the entire LangGraph (LLM calls + web search + report).
+
+Splitting lets the frontend show two distinct states ("uploaded ✓ → analysing…") and lets us add re-analyse, status polling, and chat without re-uploading.
+
+This is the **same pattern** as: AWS S3 (upload first, then trigger Lambda), Stripe (create payment intent → confirm), GitHub Actions (push triggers run, run is async).
+
+#### Multipart form data — why `File(...)` and `Form(...)`
+
+```python
+file:           UploadFile = File(...)
+user_location:  str        = Form(...)
+target_company: str | None = Form(None)
+```
+
+A multipart form payload mixes binary file parts with text form fields. FastAPI's `File(...)` and `Form(...)` declare which is which. The alternative — JSON body + base64-encoded file — bloats payloads ~33% and is awkward for browsers.
+
+`...` (Ellipsis) marks a required field; `Form(None)` means optional with default `None`.
+
+#### Validation layers — defence in depth
+
+The endpoint validates in this order, failing fast:
+
+| Order | Check | HTTP | Why |
+|---|---|---|---|
+| 1 | Extension in `{.pdf, .docx}` | 400 | Reject before reading bytes |
+| 2 | Size ≤ 5 MB | 413 | Don't waste memory on huge files |
+| 3 | File is not empty | 400 | Empty bytes = nothing to parse |
+| 4 | Parser doesn't crash | 400 | Corrupt PDFs / locked DOCX |
+| 5 | Extracted text is non-empty | 400 | Scanned PDFs hit this — we don't OCR yet |
+
+Each layer catches a class of bug the previous one couldn't. This is the same idea Java devs use with Bean Validation chains (`@NotEmpty` → `@Size` → `@Pattern` → custom validator).
+
+#### Why a `session_id` (not a database auto-increment)?
+
+```python
+session_id = f"sess_{uuid.uuid4().hex[:10]}"
+```
+
+- **Opaque** — clients can't enumerate other people's sessions by guessing `id+1`.
+- **Stable across stores** — the SAME id keys the SQLite row, the upload file, the parsed text file, and the ChromaDB collection.
+- **Cheap to generate client-side later** — UUIDs need no central coordination, unlike auto-incremented IDs.
+
+The `sess_` prefix is a common practice (Stripe: `cus_`, `pi_`; Slack: `T...`, `U...`) — makes IDs grep-friendly in logs.
+
+#### File storage layout
+
+```
+data/uploads/{session_id}.pdf        ← original file
+data/sessions/{session_id}.txt       ← parsed plain text
+resumeiq.db                           ← session row + (later) analysis row
+data/chroma_db/                       ← embeddings (added by /analyse)
+```
+
+Three storage tiers, each with a single responsibility:
+
+- **Filesystem** for blobs (PDFs, parsed text) — cheap, no schema needed.
+- **SQLite** for structured metadata (status, timestamps, FK relationships).
+- **ChromaDB** for vectors (added later by the embedding node inside the graph).
+
+In production these become S3 + Postgres + a managed vector DB, but the **separation** is the same.
+
+#### `async def` vs `def`
+
+`upload_resume` is `async def` because `file.read()` is genuinely async (streams bytes off the request). `analyse_resume` (Step 4.3) is `def` because it's CPU/IO-bound for ~60s and FastAPI runs sync routes in a threadpool.
+
+Rule of thumb:
+- **`async def`** when you `await` something (network, DB driver that supports it).
+- **`def`** when the body is sync and slow — FastAPI offloads it.
+
+Mixing them in the same router is fine and idiomatic.
+
+#### Interview Questions
+
+1. **"Why split upload and analyse instead of one endpoint?"**
+   Latency. Upload is ~1s, analyse is ~30-90s. A single endpoint would force the client to hold an HTTP connection open for a minute. Splitting lets the UI show progress (`uploaded ✓ → analysing…`), survives client disconnects between phases, and supports re-analyse on the same upload.
+
+2. **"Why not store files in SQLite as BLOBs?"**
+   SQLite handles BLOBs but it bloats the DB file, slows backups, and ties file lifecycle to row lifecycle. The standard pattern is filesystem (or S3) for blobs, DB for metadata. SQLite's authors explicitly recommend BLOBs only when files are <100 KB and tightly bound to row reads. Resumes are ~50-500 KB and read independently of the row.
+
+3. **"What can go wrong with `await file.read()` for large files?"**
+   It loads the full file into memory at once. For a 5 MB cap that's fine; for a 500 MB upload it would OOM the worker. The fix: stream to disk in chunks via `file.file` (the underlying SpooledTemporaryFile). We don't need that here because we cap at 5 MB.
+
+4. **"Why use UUIDs instead of integer IDs?"**
+   Integer IDs leak information (sequential = guessable; size = how many sessions exist). UUIDs are opaque, collision-free without coordination, and safe to expose in URLs. Cost: 36 bytes vs 8, slightly slower joins. For this app the cost is irrelevant.
+
+5. **"What's the failure mode if the upload succeeds but `create_session` raises?"**
+   The file and parsed text are on disk but no SQLite row references them — orphan files. For a hobby app, fine (a periodic cleanup job sweeps `data/uploads/` against `resume_sessions.id`). For production, do the SQL insert FIRST inside a transaction and write the file second; if file write fails, the txn is rolled back. Or use a queue + idempotent worker.
+
+6. **"How would you add auth here?"**
+   Add a `Depends(get_current_user)` parameter that resolves a JWT/cookie to a `user_id`. Add a `user_id` column to `resume_sessions`. Filter every read by `user_id`. The endpoint shape stays identical — auth is a cross-cutting concern, not a route concern.
+
+---
+
+### Step 4.3 — `/analyse` Endpoint
+
+**File(s) updated:** `app/api/routes.py`
+
+#### What this step does
+
+Implements `POST /api/analyse` — the endpoint that takes a `session_id` (from a previous `/upload`) and runs the full 6-node LangGraph pipeline against it. On success the analysis is persisted to SQLite and the entire result returned to the client.
+
+This is the **payoff endpoint** — every Phase 1, 2, and 3 component finally fires through a real HTTP request.
+
+#### Endpoint flow at a glance
+
+```
+client POST /api/analyse {session_id}
+        |
+        v
+1. get_session(session_id)     → 404 if missing
+2. get_session_text(session_id) → 404 if file missing
+3. create_initial_state(...)
+4. update_session_status('analysing')
+5. graph.invoke(state)          ← 30-90s of LLM work
+6. branch on final_state:
+   ├─ validation_passed=False  → status='validation_failed', return 200 with missing_fields
+   ├─ state['error'] set       → status='error', raise 500
+   └─ otherwise                → save_analysis(...), status='analysed', return 200 with full report
+```
+
+#### Why `def` instead of `async def`
+
+```python
+@router.post("/analyse", response_model=AnalyseResponse)
+def analyse_resume(req: AnalyseRequest):
+    ...
+```
+
+`graph.invoke()` is a synchronous, blocking call that takes 30-90s. If we declared the route `async def`, that long sync call would block the FastAPI event loop — every other request to the server would queue behind it.
+
+FastAPI's trick: routes declared with plain `def` are automatically run on a threadpool. So while one analyse is grinding, the event loop is still free to serve `/health`, `/api/upload`, etc. The Java analogue is using a `@Async` Spring method — same idea: free up the request thread for other traffic.
+
+#### Three-state response design
+
+The endpoint can finish in three observable ways:
+
+| Outcome | HTTP | `status` field | Action |
+|---|---|---|---|
+| Resume validated and pipeline ran | 200 | `'analysed'` | Returns full report + persists to `analysis_results` |
+| Resume missing required fields | 200 | `'validation_failed'` | Returns `missing_fields` list, no persist |
+| Pipeline error (state.error or exception) | 500 | — | Updates session to `'error'`, returns detail |
+
+Note that **validation failure is HTTP 200, not 4xx**. Why? Validation failure is a *successful* analysis result that says "this resume is incomplete" — the API did its job. 4xx would mean *the request itself was malformed* (bad session_id, missing fields). This is a subtle but common API design point — *response status* describes outcome, not the value of that outcome.
+
+(GitHub does the same: a code-search query that returns zero hits is 200, not 404.)
+
+#### Why we wrap `graph.invoke()` in try/except
+
+```python
+update_session_status(session_id, status="analysing")
+try:
+    final_state = get_graph().invoke(state)
+except Exception as e:
+    update_session_status(session_id, status="error")
+    raise HTTPException(status_code=500, detail=f"Pipeline error: {e}")
+```
+
+Without the `except`, an exception would leave `resume_sessions.status` stuck at `'analysing'` forever. The frontend (Step 4.5 will poll status) would show a perpetual spinner. Always pair "set status to in-progress" with "ensure status is set to a terminal value on every exit path."
+
+This is the same pattern as a Java `try { /* work */ } finally { /* cleanup */ }` — every exit path leaves the system in a defined state.
+
+#### Persisting analysis results
+
+```python
+save_analysis(
+    session_id=session_id,
+    resume_issues=...,
+    skills_found=...,
+    questions=...,
+    salary_range=...,
+    active_companies=...,
+)
+update_session_status(session_id, status="analysed", chunks_count=...)
+```
+
+Why save the analysis *and* update the session status? Two tables, two concerns:
+
+- `analysis_results` — the **content** (issues, questions, salary). Append-only — re-analysing the same session creates a NEW row. This is by design: it preserves history if we ever want to compare improvements.
+- `resume_sessions.status` — the **state machine** position. Single row per session.
+
+The `/status` endpoint (Step 4.5) reads from `resume_sessions`. The `/chat` endpoint (Step 4.4) reads from `analysis_results` to ground its responses.
+
+#### Idempotence & re-runs
+
+Calling `/analyse` twice with the same `session_id` works:
+
+- The embedding node calls `delete_session(session_id)` before re-chunking, so ChromaDB doesn't accumulate stale vectors.
+- `save_analysis` inserts a new row each time — `get_analysis()` reads the most recent (`ORDER BY id DESC LIMIT 1`).
+- `update_session_status` is a single-row UPDATE — overwrites cleanly.
+
+So re-runs are safe. The only cost is the 30-90s of LLM time.
+
+#### Response shape — why so many fields
+
+```python
+class AnalyseResponse(BaseModel):
+    session_id, status, validation_passed, missing_fields,
+    chunks_count, role_type, role_description, skills_found,
+    resume_issues, questions, salary_range, active_companies,
+    final_report, elapsed_seconds
+```
+
+The response **mirrors the final graph state** (minus internal plumbing like `current_step`). Why return all of it instead of just `final_report`?
+
+- The frontend may render the structured data (skills as chips, salary as a bar, companies as a list) instead of just a text blob.
+- `elapsed_seconds` is useful for the UI to show "Analysed in 47s" and for ops to monitor LLM latency drift.
+- Returning the parts means the client doesn't need a second `/api/result/{session_id}` round trip.
+
+If the response ever gets too big to send all at once, Step 4.6 (streaming) is exactly how we fix it.
+
+#### AI / LangGraph concept
+
+`/analyse` is the **first place LangGraph touches the outside world**. Up to Phase 3, `graph.invoke()` was only called in `tests/test_e2e.py`. Now it sits behind an HTTP boundary:
+
+- Inputs are untrusted (client-controlled `session_id`).
+- Outputs must be JSON-serialisable (LangGraph's TypedDict state already is).
+- Errors must map to HTTP status codes (we route validator failures to 200, pipeline errors to 500).
+- Latency must be *survivable* (~60s requires `def` + threadpool, not `async def`).
+
+This is a common interview probe: *"Where does your AI pipeline meet the web?"* Answer with this endpoint.
+
+#### Interview Questions
+
+1. **"Why is `analyse_resume` defined with `def` and not `async def`?"**
+   Because `graph.invoke()` is a synchronous, blocking call that runs LLMs for ~60s. An `async def` route runs on the event loop, so a single in-flight `/analyse` would block every other request. Plain `def` routes are auto-dispatched to FastAPI's threadpool — the loop stays free to serve health checks, uploads, etc., during that minute.
+
+2. **"You return HTTP 200 even when validation fails. Why isn't that a 4xx?"**
+   HTTP status codes describe the request, not the *value* of the result. The request was well-formed, the API ran successfully, and produced a structured "this resume is incomplete" answer. That's a 200 with `status=validation_failed`. 4xx would mean the request itself was malformed (e.g., missing session_id, unknown ID). GitHub, Stripe, and most modern APIs follow this convention.
+
+3. **"What state is left in the DB if `graph.invoke()` raises mid-pipeline?"**
+   Without protection: `resume_sessions.status` would be stuck at `'analysing'` forever — a poisoned record. We wrap the call in try/except, set status to `'error'` in the except branch, and re-raise as HTTP 500. Always pair an in-progress status update with a terminal-state guarantee on every exit path.
+
+4. **"How is this endpoint idempotent on re-calls?"**
+   The embedding node deletes prior ChromaDB vectors for the session before re-embedding. `save_analysis` inserts a new row (history preserved); `get_analysis` reads the most recent. Status updates are single-row UPDATEs, so they overwrite. Net effect: re-running gives a fresh result without stale residue.
+
+5. **"Why two SQLite tables — `resume_sessions` and `analysis_results` — instead of one?"**
+   Different lifecycles. `resume_sessions` is a state-machine row (one per session, mutated as it progresses). `analysis_results` is append-only content (multiple rows per session if re-analysed). Mixing them would force one table to be both mutable and historical — awkward to query and easy to corrupt.
+
+6. **"How would you turn this into an async / background job?"**
+   Two changes: (a) `/analyse` enqueues a job to a queue (Redis Streams, RabbitMQ, Celery) and returns 202 Accepted with the `session_id`; (b) a worker process pulls the job and runs `graph.invoke()`. The frontend polls `/api/status/{session_id}` (Step 4.5) for completion. Step 4.6 — streaming — is a lighter weight version of this using SSE or WebSockets to push intermediate node updates.
+
+---
+
+### Step 4.4 — `/chat` Endpoint
+
+**File(s) updated:** `app/api/routes.py`
+
+#### What this step does
+
+Implements `POST /api/chat` — a multi-turn follow-up chat that lets the candidate ask questions *about their analysed resume*. Every turn is grounded in three things: live RAG retrieval over the resume, the latest analysis row from SQLite, and the tail of the chat history. Both the user message and the assistant reply are persisted in the `chat_history` table so the next turn can see them.
+
+This is the conversational layer on top of the one-shot `/analyse` report. After analysis, the user can drill in: "rewrite the second bullet of my Razorpay job", "give me a 90-second answer for the consistency-vs-availability question", "is 28 LPA realistic for me?".
+
+#### Endpoint flow at a glance
+
+```
+client POST /api/chat {session_id, message}
+        |
+        v
+1. validate message length (Pydantic Field, 1-2000 chars)
+2. get_session(session_id)              → 404 if missing
+3. require status == 'analysed'         → 409 otherwise
+4. get_analysis(session_id)             → 409 if no row
+5. get_chat_history(session_id)         → tail of N used as multi-turn context
+6. embed_query(user_message) + retrieve_chunks(...) → RAG context
+7. build messages = [system + history tail + new user]
+8. client.chat(...)                     ← LLM call
+9. add_chat_message(user) + add_chat_message(assistant)
+10. return assistant text + elapsed + history_count
+```
+
+#### Why three grounding sources, not one
+
+A single source is never enough on its own:
+
+- **RAG retrieval alone** — The LLM sees raw resume chunks but doesn't know what the analyser already concluded ("you're missing quantified achievements", "skills_found = [...]"). It would re-derive those judgements badly each turn.
+- **Analysis row alone** — The LLM sees the *summary* but loses the actual resume wording. It can't quote a bullet, suggest a rewrite, or answer "what did I say about Kafka".
+- **History alone** — Pure conversational memory with no grounding lets the model freely hallucinate resume content.
+
+Combining all three gives the model the *what* (resume chunks), the *meta* (analysis), and the *thread* (history). It's the same pattern the resume-analyser node uses, plus chat history layered on top.
+
+#### Why retrieval is conditioned on the user's message
+
+```python
+def _retrieve_resume_context(session_id: str, query: str) -> str:
+    q_vec  = embed_query(query)
+    chunks = retrieve_chunks(q_vec, session_id=session_id, n_results=_CHAT_RAG_CHUNKS)
+```
+
+The user's question — not a fixed query — drives retrieval. If they ask about *Kafka*, the embedder pulls Kafka-relevant chunks. If they ask about *managerial experience*, it pulls leadership chunks. This is **query-conditioned RAG**: the right context surfaces for each turn instead of stuffing the entire resume into every prompt.
+
+The agent uses this same trick (Agent 1 issues *three* fixed queries to get a balanced view); chat needs only one because the user's question already names the topic.
+
+#### Why we cap history at the last N messages
+
+```python
+_CHAT_HISTORY_LIMIT = 10
+
+for row in history[-_CHAT_HISTORY_LIMIT:]:
+    ...
+```
+
+Local LLMs have a finite context window (llama3.1:8b is 128K, but practically much less is useful). Forwarding *every* prior turn would (a) inflate prompt cost on every chat, (b) push older, less relevant turns into the window, (c) eventually overflow. Tail-only is the cheapest version of conversational memory; the full history is still on disk if you ever need to render it.
+
+This mirrors how production chat systems work — even ChatGPT compacts/summarises old turns once a thread gets long.
+
+#### Why HTTP 409 (Conflict) when the session isn't analysed
+
+```python
+if session_row["status"] != "analysed":
+    raise HTTPException(status_code=409, ...)
+```
+
+The request itself is well-formed (valid session_id, valid message), so it's not a 4xx-input-error. But the resource is in the wrong *state* to satisfy the request — `/chat` needs `analysis_results` to ground itself, and that row only exists after `/analyse`. **409 Conflict** is the canonical "your request is fine, but the resource state isn't" code. Same family as "PUT to a stale ETag" or "delete a row that's locked".
+
+A 404 would be misleading (the session does exist), and a 400 would imply the client could fix it just by editing the request body (they can't — they have to call a different endpoint first).
+
+#### Why we persist BOTH messages — and only after the LLM succeeds
+
+```python
+add_chat_message(session_id, role="user",      message=user_message)
+add_chat_message(session_id, role="assistant", message=assistant_message)
+```
+
+Two design choices baked in here:
+
+1. **After, not before.** If we logged the user message first and the LLM call failed, we'd accumulate orphan user messages that have no reply. Persisting after the LLM succeeds keeps history balanced (every user turn has a paired assistant turn).
+2. **Both, not just the assistant.** The user turn must be in history so the *next* call sees the question that was asked — without it, the model would hallucinate continuity. Skipping it is a common bug ("why does the bot keep asking what I just said?").
+
+A more sophisticated variant uses a transaction so both rows commit together. SQLite makes that trivial; for now, two sequential inserts are good enough — the only failure mode is the process crashing between the two `INSERT` statements, which is recoverable.
+
+#### Why `def`, not `async def`
+
+Same reasoning as `/analyse`. `client.chat()` is a synchronous call into Ollama that takes 5-30s. An `async def` route runs on the event loop, blocking *every* in-flight request for the duration. A plain `def` route is auto-dispatched to FastAPI's threadpool — the loop stays free for `/health`, parallel `/chat` calls from other sessions, etc.
+
+#### Pydantic field constraints
+
+```python
+class ChatRequest(BaseModel):
+    session_id: str
+    message:    str = Field(..., min_length=1, max_length=2000, ...)
+```
+
+Min 1 prevents empty messages from reaching the LLM (cheap input gate). Max 2000 caps prompt size — this isn't security, it's *budgeting*: a 50K-character "message" would spike LLM latency, embed-call cost, and ChromaDB query time. Hard limit at the boundary, no need to recheck inside the handler.
+
+This is the equivalent of `@Size(min=1, max=2000)` on a Spring `@RequestBody` field.
+
+#### AI / LangGraph concept
+
+`/chat` is **the simplest form of an agent** — a single LLM call grounded by deterministic retrieval. Note what it does *not* do:
+
+- It does **not** invoke the LangGraph (no validator, no router, no salary node). The graph is one-shot analysis; chat is interactive follow-up. They share data (chat reads `analysis_results`) but live in different runtime modes.
+- It does **not** maintain its own state schema. The session row + analysis row + chat history *are* the state — kept in SQLite, not in a `TypedDict`.
+
+This is the right architectural split: the heavy multi-step orchestration belongs in LangGraph, but a simple Q&A loop is overkill to model as a graph. **Use the right tool per concern.**
+
+If chat needs to grow up later — e.g. "tell the chat to call the salary tool live, with up-to-date market data" — *that's* when you'd promote it to its own LangGraph: tool-calling node, web-search tool, retrieval tool. For now, single-LLM-call grounded by RAG is the right scale.
+
+#### Interview Questions
+
+1. **"Why does `/chat` build the system prompt fresh on every turn instead of caching it?"**
+   Two of the three grounding sources are query-conditioned: RAG retrieval depends on the *current* user message, and the history tail grows with every turn. Caching would freeze the context and break grounding. The deterministic part (analysis fields) is cheap to format — there's no point caching it separately.
+
+2. **"What stops a long conversation from blowing past the LLM's context window?"**
+   The `_CHAT_HISTORY_LIMIT = 10` cap on history tail and the `Field(max_length=2000)` cap on each message. With those bounds, the worst-case prompt is bounded: ~system_prompt + 10 × 2000 chars + 1 × 2000 chars + RAG chunks. Beyond that, the cure is summarisation: replace the oldest N turns with one LLM-generated summary message.
+
+3. **"Why is the failure mode for an unanalysed session 409 and not 404 or 400?"**
+   The session *exists* (so not 404) and the request is *well-formed* (so not 400) — but the resource is in the wrong state to satisfy the action. 409 Conflict is the canonical code for that case. Same family of error as "PUT with stale ETag", "delete on a locked row", "POST to an order that's already shipped". A 404 would imply the client should retry with a different ID; a 400 would imply they should edit the body. Both are the wrong nudge.
+
+4. **"What's the pattern for grounding a chat agent in private data?"**
+   System prompt + retrieval-augmented context + conversation history. The system prompt fixes persona and rules. Retrieval pulls only the relevant private documents per turn (so the LLM doesn't hallucinate). History gives multi-turn coherence. All three combine into a single `messages` array; the LLM does the rest. The exact structure here is portable to any vertical — replace "resume + analysis" with "ticket + customer-history" or "product spec + design-doc".
+
+5. **"What's a subtle bug if you persist the user message *before* the LLM call?"**
+   If the LLM call fails (network, timeout, OOM), you've orphaned the user's message — history is now unbalanced (user turn with no assistant reply), and the next turn will "see" a question that was never answered. The model may try to answer it again, repeat itself, or get confused. Persisting after success keeps every user turn paired with an assistant turn.
+
+6. **"Why isn't `/chat` part of the LangGraph?"**
+   Because it's a single LLM call. LangGraph earns its complexity when you have multiple agents with conditional routing, shared state, and pipeline control flow — `/analyse` has all three. Chat doesn't need any of it: one retrieval, one LLM call, one persist. Wrapping that in a graph adds ceremony without solving anything. The day chat starts calling tools (live web search for "what salaries did Razorpay post this week") is the day to promote it.
+
+---
+
 ## Progress Tracker
 
 | Step | Status | File |
@@ -2110,9 +2503,9 @@ Then visit:
 | 3.3 Salary Integration | ✅ Done | `app/graph/agents/salary_agent.py` |
 | 3.4 End-to-end test | ✅ Done | `tests/test_e2e.py` |
 | 4.1 main.py | ✅ Done | `app/main.py` (+ `app/api/routes.py` skeleton) |
-| 4.2 /upload endpoint | ⬜ Pending | `app/api/routes.py` |
-| 4.3 /analyse endpoint | ⬜ Pending | `app/api/routes.py` |
-| 4.4 /chat endpoint | ⬜ Pending | `app/api/routes.py` |
+| 4.2 /upload endpoint | ✅ Done | `app/api/routes.py` |
+| 4.3 /analyse endpoint | ✅ Done | `app/api/routes.py` |
+| 4.4 /chat endpoint | ✅ Done | `app/api/routes.py` |
 | 4.5 /status endpoint | ⬜ Pending | `app/api/routes.py` |
 | 4.6 Streaming response | ⬜ Pending | `app/api/routes.py` |
 | 5.1 Frontend connect | ⬜ Pending | `frontend/index.html` |
