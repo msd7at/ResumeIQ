@@ -129,28 +129,28 @@ resume-ai-agent/
 ### Phase 2 — LangGraph Agents
 
 - [x] Step 2.1 — State design (state.py)
-- [ ] Step 2.2 — Resume Analyser Agent
-- [ ] Step 2.3 — Dynamic Router
-- [ ] Step 2.4 — Question Generator Agent
-- [ ] Step 2.5 — Salary + Market Intel Agent
-- [ ] Step 2.6 — Report Compiler Agent
-- [ ] Step 2.7 — Graph Builder
+- [x] Step 2.2 — Resume Analyser Agent
+- [x] Step 2.3 — Dynamic Router
+- [x] Step 2.4 — Question Generator Agent
+- [x] Step 2.5 — Salary + Market Intel Agent
+- [x] Step 2.6 — Report Compiler Agent
+- [x] Step 2.7 — Graph Builder
 
 ### Phase 3 — Web Search Integration
 
-- [ ] Step 3.1 — DuckDuckGo tool setup
-- [ ] Step 3.2 — Integrate in Company Q Agent
-- [ ] Step 3.3 — Integrate in Salary Agent
-- [ ] Step 3.4 — End to end test
+- [x] Step 3.1 — DuckDuckGo tool setup
+- [x] Step 3.2 — Integrate in Question Generator (use recent {target_company} interview reports to refresh LLM context)
+- [x] Step 3.3 — Integrate in Salary Agent (live salary + active hiring lookups)
+- [x] Step 3.4 — End to end test
 
 ### Phase 4 — FastAPI Backend
 
-- [ ] Step 4.1 — main.py setup
-- [ ] Step 4.2 — /upload endpoint
-- [ ] Step 4.3 — /analyse endpoint
-- [ ] Step 4.4 — /chat endpoint
-- [ ] Step 4.5 — /status endpoint
-- [ ] Step 4.6 — Streaming response
+- [x] Step 4.1 — main.py setup
+- [x] Step 4.2 — /upload endpoint
+- [x] Step 4.3 — /analyse endpoint
+- [x] Step 4.4 — /chat endpoint
+- [x] Step 4.5 — /status endpoint
+- [x] Step 4.6 — Streaming response
 
 ### Phase 5 — Frontend + Final Polish
 

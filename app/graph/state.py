@@ -17,7 +17,11 @@ class ResumeState(TypedDict):
 
     # ── Agent outputs ─────────────────────────────────────────────
     resume_issues:    list[str]   # Agent 1 — what's wrong with the resume
-    skills_found:     list[str]   # Agent 1 — skills detected
+    skills_found:     list[str]   # Agent 1 — skills / competencies detected
+    role_type:        str         # Agent 1 — broad profession ("software engineering",
+                                  #          "marketing", "data science", "finance",
+                                  #          "design", "sales", "healthcare", etc.)
+    role_description: str         # Agent 1 — one-line role summary
     questions:        list[dict]  # Agent 3 — interview questions
     salary_range:     dict        # Agent 4 — salary + market data
     active_companies: list[str]   # Agent 4 — companies currently hiring
@@ -51,6 +55,8 @@ def create_initial_state(
         chunks_count=0,
         resume_issues=[],
         skills_found=[],
+        role_type="",
+        role_description="",
         questions=[],
         salary_range={},
         active_companies=[],
