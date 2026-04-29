@@ -10,6 +10,7 @@ Endpoints (built incrementally across Steps 4.2 - 4.6):
     GET  /api/status/{session_id}   — current pipeline step                          (Step 4.5)
 """
 
+import json
 import os
 import time
 import uuid
@@ -17,6 +18,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi.responses import StreamingResponse
 from ollama import Client
 from pydantic import BaseModel, Field
 
@@ -130,6 +132,15 @@ class ChatResponse(BaseModel):
     history_count:     int   # total chat_history rows for this session AFTER this turn
 
 
+class StatusResponse(BaseModel):
+    session_id:     str
+    status:         str
+    updated_at:     str
+    missing_fields: list[str]
+    chunks_count:   int
+    message:        str
+
+
 # ──────────────────────────────────────────────────────────────────
 #  Routes
 # ──────────────────────────────────────────────────────────────────
@@ -141,10 +152,11 @@ def api_root():
     return {
         "service":   "ResumeIQ API",
         "endpoints": [
-            "POST /api/upload",
-            "POST /api/analyse",
-            "POST /api/chat",
-            "GET  /api/status/{session_id}  [Step 4.5]",
+            "POST /api/upload                — upload resume file, get session_id",
+            "POST /api/analyse              — run full pipeline, blocks until done",
+            "POST /api/analyse/stream       — same pipeline streamed as SSE events",
+            "POST /api/chat                 — multi-turn chat about an analysed resume",
+            "GET  /api/status/{session_id}  — poll current pipeline status",
         ],
     }
 
@@ -507,4 +519,227 @@ def chat_with_resume(req: ChatRequest):
         assistant_message=assistant_message,
         elapsed_seconds=round(elapsed, 2),
         history_count=len(history) + 2,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+#  GET /api/status/{session_id} — Step 4.5
+# ──────────────────────────────────────────────────────────────────
+
+_STATUS_MESSAGES: dict[str, str] = {
+    "uploaded":          "Resume uploaded. Run POST /api/analyse or POST /api/analyse/stream to start analysis.",
+    "analysing":         "Analysis is running. Poll again in a few seconds, or use POST /api/analyse/stream for real-time updates.",
+    "analysed":          "Analysis complete. Use POST /api/chat to ask questions about the resume.",
+    "validation_failed": "Resume failed validation — check missing_fields for what to fix, then re-upload.",
+    "error":             "An error occurred during analysis. Try uploading the resume again.",
+}
+
+
+@router.get("/status/{session_id}", response_model=StatusResponse)
+async def get_status(session_id: str):
+    """
+    Return the current processing status of a resume session.
+
+    Useful for polling progress during a long /analyse call, or confirming
+    a session is ready before calling /chat.
+
+    Status values:
+        uploaded          — file parsed; analysis not yet started
+        analysing         — LangGraph pipeline is running
+        analysed          — pipeline complete; chat is now available
+        validation_failed — resume lacked required fields; see missing_fields
+        error             — pipeline crashed; re-upload to retry
+    """
+    session_row = get_session(session_id)
+    if session_row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session {session_id!r} not found.",
+        )
+
+    return StatusResponse(
+        session_id=session_id,
+        status=session_row["status"],
+        updated_at=session_row["updated_at"],
+        missing_fields=session_row["missing_fields"],
+        chunks_count=session_row["chunks_count"],
+        message=_STATUS_MESSAGES.get(session_row["status"], "Unknown status."),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────
+#  POST /api/analyse/stream — Step 4.6  (Server-Sent Events)
+# ──────────────────────────────────────────────────────────────────
+
+_NODE_LABELS: dict[str, tuple[str, int]] = {
+    "validator":          ("Validating resume structure",        1),
+    "embedding":          ("Chunking & embedding resume text",   2),
+    "resume_analyser":    ("Analysing skills, role & issues",    3),
+    "question_generator": ("Generating interview questions",     4),
+    "salary_agent":       ("Researching salary & hiring market", 5),
+    "report_compiler":    ("Compiling final report",             6),
+}
+
+_TOTAL_STEPS = len(_NODE_LABELS)
+
+
+def _sse(payload: dict) -> str:
+    """Encode a dict as a Server-Sent Event data line."""
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+def _node_partial(node_name: str, updates: dict) -> dict:
+    """Return only the fields worth surfacing for each node's SSE event."""
+    if node_name == "validator":
+        return {
+            "validation_passed": updates.get("validation_passed"),
+            "missing_fields":    updates.get("missing_fields", []),
+        }
+    if node_name == "embedding":
+        return {"chunks_count": updates.get("chunks_count", 0)}
+    if node_name == "resume_analyser":
+        return {
+            "role_type":        updates.get("role_type", ""),
+            "role_description": updates.get("role_description", ""),
+            "skills_found":     updates.get("skills_found", []),
+            "resume_issues":    updates.get("resume_issues", []),
+        }
+    if node_name == "question_generator":
+        return {"questions_count": len(updates.get("questions", []))}
+    if node_name == "salary_agent":
+        return {
+            "salary_range":     updates.get("salary_range", {}),
+            "active_companies": updates.get("active_companies", []),
+        }
+    if node_name == "report_compiler":
+        report = updates.get("final_report") or ""
+        return {"final_report_preview": report[:300] + "…" if len(report) > 300 else report}
+    return {}
+
+
+@router.post("/analyse/stream")
+def stream_analyse(req: AnalyseRequest):
+    """
+    Stream the LangGraph analysis pipeline as Server-Sent Events (SSE).
+
+    Each event has the shape:
+        data: {"event": "<type>", ...fields}
+
+    Event types:
+        "started"       — pipeline has begun; total_steps tells the client how many nodes to expect
+        "node_complete" — one graph node finished; includes step number, label, and partial results
+        "done"          — pipeline finished; includes the full analysis payload (same shape as /analyse)
+        "error"         — fatal error; message field describes the failure
+
+    The connection stays open while the graph executes (~30-90 s for a typical resume).
+    Clients should consume events until "done" or "error", then close the connection.
+
+    Defined as `def` (not `async def`) so FastAPI runs it in the threadpool — the synchronous
+    graph.stream() iterator runs without blocking the event loop.
+    """
+    session_id = req.session_id
+
+    session_row = get_session(session_id)
+    if session_row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session {session_id!r} not found. Upload a resume first via POST /api/upload.",
+        )
+
+    resume_text = get_session_text(session_id)   # raises 404 if file missing
+
+    state = create_initial_state(
+        session_id=session_id,
+        resume_text=resume_text,
+        user_location=session_row["user_location"],
+        target_company=session_row["target_company"],
+    )
+
+    def event_gen():
+        update_session_status(session_id, status="analysing")
+        t0 = time.time()
+
+        yield _sse({"event": "started", "session_id": session_id, "total_steps": _TOTAL_STEPS})
+
+        accumulated = dict(state)   # mirrors the full graph state as nodes run
+
+        try:
+            for chunk in get_graph().stream(state, stream_mode="updates"):
+                for node_name, updates in chunk.items():
+                    accumulated.update(updates)
+                    label, step_num = _NODE_LABELS.get(node_name, (node_name, 0))
+                    yield _sse({
+                        "event":       "node_complete",
+                        "node":        node_name,
+                        "label":       label,
+                        "step":        step_num,
+                        "total_steps": _TOTAL_STEPS,
+                        "data":        _node_partial(node_name, updates),
+                    })
+        except Exception as e:
+            update_session_status(session_id, status="error")
+            yield _sse({"event": "error", "message": str(e)})
+            return
+
+        elapsed = time.time() - t0
+
+        # ── Validation-failed branch ─────────────────────────────
+        if not accumulated.get("validation_passed"):
+            missing = accumulated.get("missing_fields", [])
+            update_session_status(session_id, status="validation_failed", missing_fields=missing)
+            yield _sse({
+                "event":             "done",
+                "status":            "validation_failed",
+                "validation_passed": False,
+                "missing_fields":    missing,
+                "elapsed_seconds":   round(elapsed, 2),
+            })
+            return
+
+        # ── Mid-pipeline error captured in state.error ────────────
+        if accumulated.get("error"):
+            update_session_status(session_id, status="error")
+            yield _sse({"event": "error", "message": accumulated["error"]})
+            return
+
+        # ── Persist results ──────────────────────────────────────
+        save_analysis(
+            session_id=session_id,
+            resume_issues=accumulated.get("resume_issues", []),
+            skills_found=accumulated.get("skills_found", []),
+            questions=accumulated.get("questions", []),
+            salary_range=accumulated.get("salary_range", {}),
+            active_companies=accumulated.get("active_companies", []),
+        )
+        update_session_status(
+            session_id,
+            status="analysed",
+            chunks_count=accumulated.get("chunks_count", 0),
+        )
+
+        yield _sse({
+            "event":             "done",
+            "status":            "analysed",
+            "session_id":        session_id,
+            "validation_passed": True,
+            "missing_fields":    [],
+            "chunks_count":      accumulated.get("chunks_count", 0),
+            "role_type":         accumulated.get("role_type", ""),
+            "role_description":  accumulated.get("role_description", ""),
+            "skills_found":      accumulated.get("skills_found", []),
+            "resume_issues":     accumulated.get("resume_issues", []),
+            "questions":         accumulated.get("questions", []),
+            "salary_range":      accumulated.get("salary_range", {}),
+            "active_companies":  accumulated.get("active_companies", []),
+            "final_report":      accumulated.get("final_report"),
+            "elapsed_seconds":   round(elapsed, 2),
+        })
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control":     "no-cache",
+            "X-Accel-Buffering": "no",   # prevents nginx from buffering SSE frames
+        },
     )

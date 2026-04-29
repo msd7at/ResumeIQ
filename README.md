@@ -149,8 +149,8 @@ resume-ai-agent/
 - [x] Step 4.2 — /upload endpoint
 - [x] Step 4.3 — /analyse endpoint
 - [x] Step 4.4 — /chat endpoint
-- [ ] Step 4.5 — /status endpoint
-- [ ] Step 4.6 — Streaming response
+- [x] Step 4.5 — /status endpoint
+- [x] Step 4.6 — Streaming response
 
 ### Phase 5 — Frontend + Final Polish
 

@@ -2479,6 +2479,192 @@ If chat needs to grow up later — e.g. "tell the chat to call the salary tool l
 
 ---
 
+## Step 4.5 — `/status` Endpoint
+
+### What was built
+
+`GET /api/status/{session_id}` — a simple polling endpoint that reads the current session row from SQLite and returns a structured response:
+
+```json
+{
+  "session_id": "sess_abc123",
+  "status": "analysing",
+  "updated_at": "2024-01-01T12:00:05",
+  "missing_fields": [],
+  "chunks_count": 0,
+  "message": "Analysis is running. Poll again in a few seconds..."
+}
+```
+
+Status values mirror the `resume_sessions.status` column enum:
+`uploaded → analysing → analysed | validation_failed | error`
+
+A `message` field maps each status to a plain-English next-action hint, so clients don't need to hardcode the status semantics.
+
+### Bug fixed: `update_session_status` silent drop of `chunks_count`
+
+The existing function had a logic gap: when called with `chunks_count` but no `missing_fields`, it silently fell through to the `else` branch that only updated `status` — dropping `chunks_count`. Fixed by adding an `elif chunks_count is not None` branch. This affected the `/analyse` endpoint's final `update_session_status(session_id, status="analysed", chunks_count=...)` call.
+
+**Lesson:** When you write a helper with multiple optional parameters and branching, always write out every combination as a test case — `(None, None)`, `(set, None)`, `(None, set)`, `(set, set)`. Missing branches are silent and won't raise at runtime.
+
+### API / HTTP concept
+
+`/status` is a **polling endpoint** — the client repeatedly calls it at an interval to track async work. This is the simplest form of async progress reporting: no WebSockets, no queues, just database reads.
+
+Tradeoffs vs. streaming (SSE):
+
+| | Polling `/status` | Streaming SSE |
+|---|---|---|
+| Client complexity | Low — just `setInterval` | Medium — `EventSource` or `fetch` with reader |
+| Server load | Repeating DB reads | One long-lived connection |
+| Granularity | Between polls only | Every node completion |
+| Works with | Any HTTP client | Browsers + SSE-aware clients |
+| Proxy/firewall friendly | Yes | Sometimes not (buffering) |
+
+For a job that takes 30-90s, polling at 3-5s intervals is a perfectly reasonable default.
+
+### Interview Questions — Status & Polling
+
+1. **"When would you choose polling over SSE?"**
+   Polling is simpler to implement, proxy-safe, and stateless on the server side. Prefer it when the client can tolerate ~5s latency between updates, or when the server can't maintain long-lived connections (serverless functions with short timeouts). SSE is better when you want sub-second feedback or want to stream partial results as they're produced.
+
+2. **"What's the cost of polling too aggressively?"**
+   Each poll is a DB read and an HTTP round-trip. At 1 req/s × 100 concurrent users = 100 DB reads/s — fine for SQLite, but a concern under high load. Exponential backoff ("poll at 1s, then 2s, then 4s…") and a reasonable max interval are standard mitigations.
+
+---
+
+## Step 4.6 — Streaming Response (`/analyse/stream`)
+
+### Implementation
+
+`POST /api/analyse/stream` — runs the same 6-node LangGraph pipeline as `/analyse` but streams each node's completion as a **Server-Sent Event (SSE)**:
+
+```text
+data: {"event": "started", "session_id": "sess_abc", "total_steps": 6}
+
+data: {"event": "node_complete", "node": "validator", "label": "Validating resume structure", "step": 1, "total_steps": 6, "data": {"validation_passed": true, "missing_fields": []}}
+
+data: {"event": "node_complete", "node": "embedding", "label": "Chunking & embedding resume text", "step": 2, "total_steps": 6, "data": {"chunks_count": 14}}
+
+data: {"event": "node_complete", "node": "resume_analyser", ..., "data": {"role_type": "software engineering", "skills_found": ["Python", "FastAPI", ...]}}
+
+data: {"event": "node_complete", "node": "question_generator", ..., "data": {"questions_count": 5}}
+
+data: {"event": "node_complete", "node": "salary_agent", ..., "data": {"salary_range": {"min": 1200000, "max": 2000000, "currency": "INR"}, "active_companies": [...]}}
+
+data: {"event": "node_complete", "node": "report_compiler", ..., "data": {"final_report_preview": "..."}}
+
+data: {"event": "done", "status": "analysed", "elapsed_seconds": 47.3, "skills_found": [...], ...full payload...}
+```
+
+### Key concepts
+
+#### LangGraph `.stream()` with `stream_mode="updates"`
+
+LangGraph compiled graphs expose a `.stream()` method alongside `.invoke()`:
+
+```python
+for chunk in graph.stream(state, stream_mode="updates"):
+    for node_name, updates in chunk.items():
+        # node_name: which node just finished
+        # updates: only the keys this node changed in the state
+        print(node_name, updates)
+```
+
+`stream_mode="updates"` yields **incremental diffs** — only the state keys a node touched. This is cheaper to serialize and easier to route per-node than `stream_mode="values"` (full state snapshot after each node).
+
+To reconstruct the final state at the end, we accumulate all updates:
+
+```python
+accumulated = dict(initial_state)
+for chunk in graph.stream(state, stream_mode="updates"):
+    for _, updates in chunk.items():
+        accumulated.update(updates)
+# accumulated == final_state
+```
+
+This avoids running `.invoke()` after `.stream()` (which would run the graph twice).
+
+#### FastAPI `StreamingResponse` with a sync generator
+
+```python
+@router.post("/analyse/stream")
+def stream_analyse(req: AnalyseRequest):   # sync def, not async def
+    def event_gen():
+        for chunk in get_graph().stream(state, ...):
+            yield f"data: {json.dumps(...)}\n\n"
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
+```
+
+`def` (not `async def`) keeps it in FastAPI's **threadpool** — the synchronous `graph.stream()` iterator runs without touching the event loop. FastAPI/Starlette wraps sync generators in `iterate_in_threadpool`, so the streaming frames are delivered asynchronously to the client even though the generator itself is synchronous.
+
+Two headers are added:
+
+- `Cache-Control: no-cache` — prevents proxy or browser caching of the event stream
+- `X-Accel-Buffering: no` — tells nginx not to buffer SSE frames (crucial for real-time delivery)
+
+#### SSE wire format
+
+SSE is a plain-text protocol over HTTP:
+
+```text
+data: <json-payload>\n\n
+```
+
+Double newline `\n\n` terminates each event. Clients using the browser's `EventSource` API or `fetch` with a ReadableStream reader parse this automatically.
+
+No event names or IDs are required for basic SSE — a `data:` line followed by `\n\n` is a complete event.
+
+#### Error handling in a streaming context
+
+Unlike a regular endpoint where you can raise `HTTPException` mid-handler, in a streaming context the HTTP 200 header has already been sent by the time `event_gen()` runs. Errors after that must be communicated via an `{"event": "error", "message": "..."}` SSE event — you can't change the status code.
+
+This is why the error handling in `event_gen()` yields an error event and returns, rather than raising.
+
+### Interview Questions — Streaming & SSE
+
+1. **"What's the difference between streaming and polling for async work?"**
+   Polling: client repeatedly asks "are you done?" — simple, works everywhere, has a latency gap between polls. Streaming (SSE/WebSocket): server pushes updates as they happen — sub-second delivery, one connection, but needs proxy support and a long-lived connection. For a 30-90s job, SSE gives a much better UX (progress bar that moves in real time vs. a spinner that updates every 5s).
+
+2. **"Why is the route `def` instead of `async def`?"**
+   `graph.stream()` is a synchronous iterator — it blocks the calling thread while each node runs. Using `async def` and calling it directly would block the event loop. `def` lets FastAPI run the function in the threadpool, keeping the event loop responsive to other requests. If LangGraph adds a native async streaming API in the future, we could switch to `async def` with `async for`.
+
+3. **"What's `stream_mode='updates'` vs `stream_mode='values'`?"**
+   `"values"` yields the full state snapshot after each node — every key, even ones the node didn't touch. `"updates"` yields only the keys the node changed — a much smaller payload per event. `"updates"` is better for SSE because it sends less data and clearly communicates what each node *contributed*.
+
+4. **"Why can't you raise `HTTPException` after the first SSE frame is sent?"**
+   HTTP requires headers before body. The first `yield` from `event_gen()` causes Starlette to send `HTTP/1.1 200 OK` + headers to the client. After that, the response body is an open stream — you can't retroactively change the status code. Errors must be encoded in the stream body as application-level events.
+
+5. **"What's `X-Accel-Buffering: no` for?"**
+   Nginx (and some other reverse proxies) buffer the response body by default, delivering it in chunks only when the buffer fills or the connection closes. That defeats SSE — the client wouldn't see events in real time. `X-Accel-Buffering: no` signals nginx to pass each chunk through immediately. Without it, your streaming endpoint would appear to deliver everything at once at the end.
+
+6. **"How does the client consume SSE from JavaScript?"**
+
+   Because `/analyse/stream` is a `POST`, the browser `EventSource` won't work (it only supports GET). The `fetch` + `ReadableStream` approach is used for POST SSE endpoints.
+
+   ```js
+   // Option 1: EventSource (GET only, simple)
+   const es = new EventSource("/api/analyse/stream?session_id=...");
+   es.onmessage = (e) => console.log(JSON.parse(e.data));
+
+   // Option 2: fetch with ReadableStream (supports POST + request body)
+   const res = await fetch("/api/analyse/stream", {
+     method: "POST",
+     body: JSON.stringify({ session_id: "..." }),
+     headers: { "Content-Type": "application/json" }
+   });
+   const reader = res.body.getReader();
+   const decoder = new TextDecoder();
+   while (true) {
+     const { done, value } = await reader.read();
+     if (done) break;
+     console.log(decoder.decode(value));
+   }
+   ```
+
+---
+
 ## Progress Tracker
 
 | Step | Status | File |
@@ -2506,8 +2692,8 @@ If chat needs to grow up later — e.g. "tell the chat to call the salary tool l
 | 4.2 /upload endpoint | ✅ Done | `app/api/routes.py` |
 | 4.3 /analyse endpoint | ✅ Done | `app/api/routes.py` |
 | 4.4 /chat endpoint | ✅ Done | `app/api/routes.py` |
-| 4.5 /status endpoint | ⬜ Pending | `app/api/routes.py` |
-| 4.6 Streaming response | ⬜ Pending | `app/api/routes.py` |
+| 4.5 /status endpoint | ✅ Done | `app/api/routes.py` |
+| 4.6 Streaming response | ✅ Done | `app/api/routes.py` |
 | 5.1 Frontend connect | ⬜ Pending | `frontend/index.html` |
 | 5.2 Status bar | ⬜ Pending | — |
 | 5.3 Chat interface | ⬜ Pending | — |

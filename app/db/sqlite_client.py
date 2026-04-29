@@ -97,6 +97,13 @@ def update_session_status(session_id: str, status: str,
                WHERE id=?""",
             (status, json.dumps(missing_fields), now, session_id)
         )
+    elif chunks_count is not None:
+        conn.execute(
+            """UPDATE resume_sessions
+               SET status=?, chunks_count=?, updated_at=?
+               WHERE id=?""",
+            (status, chunks_count, now, session_id)
+        )
     else:
         conn.execute(
             "UPDATE resume_sessions SET status=?, updated_at=? WHERE id=?",
